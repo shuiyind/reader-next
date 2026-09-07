@@ -797,7 +797,7 @@ fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
     json!({
         "model": model,
         "temperature": 0.2,
-        "response_format": { "type": "json_object" },
+        "response_format": { "type": "json_schema", "json_schema": { "name": "chapter_data", "schema": { "type": "object" } } },
         "messages": [
             { "role": "system", "content": DEFAULT_PROMPT },
             { "role": "user", "content": prompt }
