@@ -61,14 +61,15 @@ export function deleteBooks(books: Partial<Book>[]) {
   return http.post<{ deleted: number }>('/deleteBooks', books).then((r) => r.data)
 }
 
-export function getBookInfo(url: string, origin?: string) {
-  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin }).then((r) => r.data)
+export function getBookInfo(url: string, origin?: string, book?: Partial<Book>) {
+  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin, book }).then((r) => r.data)
 }
 
 export function getChapterList(params: {
   bookUrl?: string
   tocUrl?: string
   bookSourceUrl?: string
+  book?: Partial<Book>
   refresh?: number
 }) {
   return http.post<BookChapter[]>('/getChapterList', params).then((r) => r.data)
@@ -76,19 +77,40 @@ export function getChapterList(params: {
 
 export function getBookContent(params: {
   chapterUrl?: string
+  bookUrl?: string
   bookSourceUrl?: string
+  book?: Partial<Book>
+  chapter?: Partial<BookChapter>
+  nextChapterUrl?: string
   index?: number
   refresh?: number
 }) {
   return http.post<string>('/getBookContent', params).then((r) => r.data)
 }
 
+export interface ReadingProgressSnapshot {
+  bookUrl: string
+  index?: number
+  position?: number
+  updatedAt?: number
+  chapterTitle?: string
+}
+
+export interface SaveBookProgressResponse {
+  accepted: boolean
+  currentRevision: number
+  currentProgress: ReadingProgressSnapshot
+}
+
 export function saveBookProgress(params: {
   bookUrl: string
   index: number
   position?: number
+  revision?: number
 }) {
-  return http.post<string>('/saveBookProgress', params).then((r) => r.data)
+  // Keep the legacy string in the type so a newer frontend can still talk to
+  // servers that have not yet adopted revision-aware progress responses.
+  return http.post<SaveBookProgressResponse | string>('/saveBookProgress', params).then((r) => r.data)
 }
 
 export function deleteBookCache(bookUrl: string) {

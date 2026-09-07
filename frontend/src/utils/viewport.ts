@@ -1,6 +1,24 @@
 const APP_VIEWPORT_CHANGE_EVENT = 'app-viewport-change'
 const STABILIZE_DELAYS = [0, 120, 320, 760]
 
+export function shouldUseLayoutViewportForStandalone(
+  displayModeStandalone: boolean,
+  navigatorStandalone?: boolean,
+) {
+  return displayModeStandalone || navigatorStandalone === true
+}
+
+export function resolveViewportHeightCssValue(
+  measuredHeight: number,
+  useLayoutViewport: boolean,
+  supportsLargeViewportUnit: boolean,
+) {
+  if (useLayoutViewport) {
+    return supportsLargeViewportUnit ? '100lvh' : '100vh'
+  }
+  return `${roundViewportValue(measuredHeight)}px`
+}
+
 function getViewportMetrics() {
   if (typeof window === 'undefined') {
     return {
@@ -12,6 +30,7 @@ function getViewportMetrics() {
       offsetLeft: 0,
       offsetBottom: 0,
       offsetRight: 0,
+      useLayoutViewport: false,
     }
   }
 
@@ -22,8 +41,20 @@ function getViewportMetrics() {
   const validWidths = layoutWidthCandidates.filter(value => Number.isFinite(value) && value > 0)
   const height = validHeights.length ? Math.max(...validHeights) : 0
   const width = validWidths.length ? Math.max(...validWidths) : 0
-  const visualHeight = viewport?.height && viewport.height > 0 ? viewport.height : height
-  const visualWidth = viewport?.width && viewport.width > 0 ? viewport.width : width
+  const navigatorStandalone = (window.navigator as Navigator & { standalone?: boolean }).standalone
+  const useLayoutViewport = shouldUseLayoutViewportForStandalone(
+    window.matchMedia?.('(display-mode: standalone)').matches === true,
+    navigatorStandalone,
+  )
+  // iOS can report visualViewport a few pixels shorter in home-screen mode,
+  // leaving an unused strip below full-screen views. There are no browser
+  // controls in standalone mode, so the layout viewport is the correct size.
+  const visualHeight = useLayoutViewport
+    ? height
+    : viewport?.height && viewport.height > 0 ? viewport.height : height
+  const visualWidth = useLayoutViewport
+    ? width
+    : viewport?.width && viewport.width > 0 ? viewport.width : width
   const offsetTop = Math.max(0, viewport?.offsetTop || 0)
   const offsetLeft = Math.max(0, viewport?.offsetLeft || 0)
   const offsetBottom = Math.max(0, height - visualHeight - offsetTop)
@@ -38,6 +69,7 @@ function getViewportMetrics() {
     offsetLeft,
     offsetBottom,
     offsetRight,
+    useLayoutViewport,
   }
 }
 
@@ -52,9 +84,19 @@ function setViewportCssVariables() {
   const metrics = getViewportMetrics()
   if (!metrics.height || !metrics.width) return false
 
-  const nextHeight = `${roundViewportValue(metrics.height)}px`
+  const supportsLargeViewportUnit = typeof CSS !== 'undefined'
+    && CSS.supports('height', '100lvh')
+  const nextHeight = resolveViewportHeightCssValue(
+    metrics.height,
+    metrics.useLayoutViewport,
+    supportsLargeViewportUnit,
+  )
   const nextWidth = `${roundViewportValue(metrics.width)}px`
-  const nextVisualHeight = `${roundViewportValue(metrics.visualHeight)}px`
+  const nextVisualHeight = resolveViewportHeightCssValue(
+    metrics.visualHeight,
+    metrics.useLayoutViewport,
+    supportsLargeViewportUnit,
+  )
   const nextVisualWidth = `${roundViewportValue(metrics.visualWidth)}px`
   const nextOffsetTop = `${roundViewportValue(metrics.offsetTop)}px`
   const nextOffsetLeft = `${roundViewportValue(metrics.offsetLeft)}px`

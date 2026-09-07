@@ -7,20 +7,21 @@ use crate::error::error::AppError;
 use crate::model::{
     book::Book,
     book_chapter::BookChapter,
-    book_source::{BookSource, ExploreKind},
+    book_source::{BookSource, BookSourceRuntimeState, ExploreKind},
     search::SearchBook,
 };
-use crate::parser::js::{eval_js, eval_js_with_bindings, with_js_lib};
+use crate::parser::js::{eval_js, eval_js_with_bindings, with_js_bindings, with_js_source};
 use crate::parser::rule_engine::RuleEngine;
 use crate::storage::cache::file_cache::FileCache;
 use crate::util::hash::md5_hex;
 use crate::util::text::{normalize_source_url, repair_encoded_url};
+use base64::Engine;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ pub struct BookService {
     storage_dir: PathBuf,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
+    bookshelf_write_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Clone, Default)]
@@ -54,6 +56,22 @@ pub struct BookSourceAvailability {
     pub explore_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReadingProgressUpdate {
+    pub index: i32,
+    pub position: Option<i32>,
+    pub updated_at: i64,
+    pub chapter_title: Option<String>,
+    pub total_chapter_num: Option<i32>,
+    pub latest_chapter_title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadingProgressSaveResult {
+    pub accepted: bool,
+    pub book: Book,
+}
+
 impl BookService {
     pub fn new(http: HttpClient, parser: RuleEngine, cache: FileCache, storage_dir: &str) -> Self {
         let storage_dir = PathBuf::from(storage_dir);
@@ -64,7 +82,16 @@ impl BookService {
             storage_dir,
             source_cookies: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
+            bookshelf_write_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    async fn bookshelf_write_lock(&self, user_ns: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.bookshelf_write_locks.lock().await;
+        locks
+            .entry(user_ns.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -109,14 +136,16 @@ impl BookService {
         self.source_cookies.write().await.remove(&key);
     }
 
-    async fn fetch_source_url(
+    async fn fetch_source_url_with_bindings(
         &self,
         user_ns: &str,
         source: &BookSource,
         url_rule: &str,
         base_url: &str,
+        bindings: HashMap<String, serde_json::Value>,
     ) -> Result<FetchResponse, AppError> {
-        let mut spec = analyze_url(url_rule, "", 1, base_url, source)?;
+        let mut spec =
+            with_js_bindings(&bindings, || analyze_url(url_rule, "", 1, base_url, source))?;
         self.apply_source_cookie(user_ns, source, &mut spec.headers)
             .await;
         let res = self.fetch_with_rate(source, spec).await?;
@@ -132,6 +161,40 @@ impl BookService {
         let result = fetch(&self.http, spec).await;
         self.finish_rate(source).await;
         result
+    }
+
+    async fn parse_chapter_list_response(
+        &self,
+        source: &BookSource,
+        res: FetchResponse,
+        bindings: HashMap<String, serde_json::Value>,
+    ) -> Result<(Vec<BookChapter>, Vec<String>), AppError> {
+        let parser = self.parser.clone();
+        let source_for_parser = source.clone();
+        run_parser_blocking(move || {
+            with_js_bindings(&bindings, || {
+                parser.chapter_list(&source_for_parser, &res.body, &res.url)
+            })
+        })
+        .await
+    }
+
+    async fn parse_content_response(
+        &self,
+        source: &BookSource,
+        res: FetchResponse,
+        bindings: HashMap<String, serde_json::Value>,
+    ) -> Result<(String, Option<String>), AppError> {
+        let parser = self.parser.clone();
+        let source = source.clone();
+        run_parser_blocking(move || {
+            with_js_bindings(&bindings, || {
+                let content = parser.content(&source, &res.body, &res.url);
+                let next_url = parser.next_content_url(&source, &res.body, &res.url);
+                (content, next_url)
+            })
+        })
+        .await
     }
 
     async fn wait_for_rate(&self, source: &BookSource) {
@@ -250,7 +313,10 @@ impl BookService {
         })?;
         let res = apply_login_check_js(source, res);
         tracing::debug!("fetch success, body length: {}", res.body.len());
-        let books = self.parser.search_books(source, &res.body, &res.url);
+        let parser = self.parser.clone();
+        let source = source.clone();
+        let books =
+            run_parser_blocking(move || parser.search_books(&source, &res.body, &res.url)).await?;
         tracing::info!("found {} books", books.len());
         Ok(books)
     }
@@ -271,7 +337,9 @@ impl BookService {
             .await;
 
         let res = apply_login_check_js(source, self.fetch_with_rate(source, spec).await?);
-        Ok(self.parser.explore_books(source, &res.body, &res.url))
+        let parser = self.parser.clone();
+        let source = source.clone();
+        run_parser_blocking(move || parser.explore_books(&source, &res.body, &res.url)).await
     }
 
     pub fn explore_kinds(&self, source: &BookSource) -> Result<Vec<ExploreKind>, AppError> {
@@ -351,6 +419,21 @@ impl BookService {
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| AppError::BadRequest("missing loginUrl".to_string()))?;
 
+        if let Some(login_ui) = parse_login_ui(source) {
+            let runtime = source.runtime.snapshot();
+            let login_info = source.login_info_for_storage(&runtime.login_info);
+            return Ok(serde_json::json!({
+                "success": true,
+                "status": 200,
+                "url": "",
+                "mode": "legadoUi",
+                "loginUi": login_ui,
+                "loginInfo": login_info,
+                "loggedIn": runtime_has_login(&runtime),
+                "checkResult": "已加载阅读 3 书源登录界面"
+            }));
+        }
+
         if let Some(target_url) = resolve_login_preview_target(source)? {
             let body_html = build_login_preview_html(source, &target_url).unwrap_or_default();
             return Ok(serde_json::json!({
@@ -371,7 +454,7 @@ impl BookService {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            Some(with_js_lib(source.js_lib.as_deref(), || {
+            Some(with_js_source(source, || {
                 eval_js(login_check_js, &res.body, &res.url).unwrap_or_default()
             }))
         } else {
@@ -388,35 +471,200 @@ impl BookService {
         }))
     }
 
-    pub async fn get_book_info(
+    pub fn execute_book_source_login_action(
+        &self,
+        source: &BookSource,
+        login_info: HashMap<String, String>,
+        action: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        let login_ui = parse_login_ui(source)
+            .ok_or_else(|| AppError::BadRequest("当前书源未配置有效 loginUi".to_string()))?;
+        let allowed_fields = login_ui
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item.get("type").and_then(serde_json::Value::as_str) != Some("button"))
+            .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+            .collect::<HashSet<_>>();
+        let login_info = login_info
+            .into_iter()
+            .filter(|(key, _)| allowed_fields.contains(key.as_str()))
+            .collect::<HashMap<_, _>>();
+        let stored_login_info = source.login_info_for_storage(&login_info);
+        source.runtime.replace_login_info(login_info.clone());
+        source.runtime.clear_notices();
+
+        let result =
+            self.execute_book_source_login_action_inner(source, &login_ui, &login_info, action);
+        source.runtime.replace_login_info(stored_login_info);
+        result
+    }
+
+    fn execute_book_source_login_action_inner(
+        &self,
+        source: &BookSource,
+        login_ui: &serde_json::Value,
+        login_info: &HashMap<String, String>,
+        action: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        let action = action.trim();
+        if !action.is_empty() && !login_ui_action_allowed(login_ui, action) {
+            return Err(AppError::BadRequest("未知的书源登录操作".to_string()));
+        }
+
+        let login_header_required = action == "login()"
+            && source
+                .login_url
+                .as_deref()
+                .is_some_and(|script| script.contains("putLoginHeader"));
+        let (result, action_success) = if action.is_empty() {
+            (String::new(), true)
+        } else {
+            let login_script = source
+                .login_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::BadRequest("missing loginUrl".to_string()))?;
+            let login_script = login_script
+                .strip_prefix("@js:")
+                .unwrap_or(login_script)
+                .trim();
+            if action == "user_logout()" && login_script.contains("putLoginHeader(\"\")") {
+                let was_logged_in = !source.runtime.snapshot().login_header.trim().is_empty();
+                source.runtime.set_login_header(String::new());
+                source.runtime.push_notice(if was_logged_in {
+                    "已成功退出登录".to_string()
+                } else {
+                    "当前未登录状态".to_string()
+                });
+                (String::new(), true)
+            } else {
+                let script = format!("{login_script}\n;({action});");
+                let bindings = HashMap::from([(
+                    "result".to_string(),
+                    serde_json::to_value(login_info).unwrap_or_else(|_| json!({})),
+                )]);
+                match with_js_source(source, || {
+                    eval_js_with_bindings(&script, "", &source.book_source_url, &bindings)
+                        .map_err(|err| AppError::BadRequest(format!("书源登录脚本执行失败：{err}")))
+                }) {
+                    Ok(result) => (result, true),
+                    Err(script_error) => {
+                        source.runtime.clear_notices();
+                        if let Some(targeted_script) =
+                            targeted_login_action_script(login_script, action)
+                        {
+                            if let Ok(result) = with_js_source(source, || {
+                                eval_js_with_bindings(
+                                    &targeted_script,
+                                    "",
+                                    &source.book_source_url,
+                                    &bindings,
+                                )
+                            }) {
+                                (result, true)
+                            } else if execute_compatible_browser_action(
+                                source,
+                                login_script,
+                                action,
+                            ) {
+                                (String::new(), true)
+                            } else if action == "login()" {
+                                if let Some(success) =
+                                    execute_compatible_form_login(source, login_info)
+                                {
+                                    (String::new(), success)
+                                } else {
+                                    return Err(script_error);
+                                }
+                            } else {
+                                return Err(script_error);
+                            }
+                        } else if execute_compatible_browser_action(source, login_script, action) {
+                            (String::new(), true)
+                        } else if action == "login()" {
+                            if let Some(success) = execute_compatible_form_login(source, login_info)
+                            {
+                                (String::new(), success)
+                            } else {
+                                return Err(script_error);
+                            }
+                        } else {
+                            return Err(script_error);
+                        }
+                    }
+                }
+            }
+        };
+
+        let state = source.runtime.snapshot();
+        let messages = source
+            .runtime
+            .take_notices()
+            .into_iter()
+            .map(|message| redact_login_notice(&message, &login_info, &state.login_header))
+            .collect::<Vec<_>>();
+        let open_url = source
+            .runtime
+            .take_browser_urls()
+            .into_iter()
+            .find(|url| url.starts_with("https://") || url.starts_with("http://"));
+        let logged_in = runtime_has_login(&state);
+        let action_success = action_success && (!login_header_required || logged_in);
+
+        Ok(serde_json::json!({
+            "success": action_success,
+            "messages": messages,
+            "loggedIn": logged_in,
+            "result": result,
+            "openUrl": open_url
+        }))
+    }
+
+    pub async fn get_book_info_with_book(
         &self,
         user_ns: &str,
         source: &BookSource,
-        book_url: &str,
+        book: &Book,
     ) -> Result<Book, AppError> {
+        let bindings = legado_js_bindings(Some(book), None, None);
         let res = self
-            .fetch_source_url(user_ns, source, book_url, &source.book_source_url)
+            .fetch_source_url_with_bindings(
+                user_ns,
+                source,
+                &book.book_url,
+                &source.book_source_url,
+                bindings.clone(),
+            )
             .await?;
-        Ok(self.parser.book_info(source, &res.body, &res.url, book_url))
+        let parser = self.parser.clone();
+        let source_for_parser = source.clone();
+        let source_url = source.book_source_url.clone();
+        let input_book = book.clone();
+        let book_url = input_book.book_url.clone();
+        let mut parsed = run_parser_blocking(move || {
+            with_js_bindings(&bindings, || {
+                parser.book_info(&source_for_parser, &res.body, &res.url, &book_url)
+            })
+        })
+        .await?;
+        preserve_book_context(&mut parsed, &input_book, &source_url);
+        Ok(parsed)
     }
 
-    pub async fn get_chapter_list(
+    pub async fn get_chapter_list_with_cache_for_book(
         &self,
         user_ns: &str,
         source: &BookSource,
-        toc_url: &str,
-    ) -> Result<Vec<BookChapter>, AppError> {
-        self.get_chapter_list_with_cache(user_ns, source, toc_url, false)
-            .await
-    }
-
-    pub async fn get_chapter_list_with_cache(
-        &self,
-        user_ns: &str,
-        source: &BookSource,
-        toc_url: &str,
+        book: &Book,
         force_refresh: bool,
     ) -> Result<Vec<BookChapter>, AppError> {
+        let toc_url = book
+            .toc_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&book.book_url);
         // Check cache first (unless force refresh)
         if !force_refresh {
             if let Ok(Some(cached)) = self.load_chapter_list_cache(user_ns, toc_url).await {
@@ -426,7 +674,7 @@ impl BookService {
             }
         }
         let (chapters, _) = self
-            .get_chapter_list_with_pagination(user_ns, source, toc_url)
+            .get_chapter_list_with_pagination(user_ns, source, book, toc_url)
             .await?;
         // Save to cache
         let _ = self
@@ -439,6 +687,7 @@ impl BookService {
         &self,
         user_ns: &str,
         source: &BookSource,
+        book: &Book,
         toc_url: &str,
     ) -> Result<(Vec<BookChapter>, Vec<String>), AppError> {
         let mut all_chapters = Vec::new();
@@ -447,25 +696,32 @@ impl BookService {
         let mut chapter_index = 0i32;
 
         // Fetch first page
+        let bindings = legado_js_bindings(Some(book), None, None);
+        let base_url = if book.book_url.trim().is_empty() {
+            source.book_source_url.as_str()
+        } else {
+            book.book_url.as_str()
+        };
         let res = self
-            .fetch_source_url(user_ns, source, toc_url, &source.book_source_url)
+            .fetch_source_url_with_bindings(user_ns, source, toc_url, base_url, bindings.clone())
             .await?;
-        let (chapters, next_urls) = self.parser.chapter_list(source, &res.body, &res.url);
+        let (chapters, next_urls) = self
+            .parse_chapter_list_response(source, res, bindings.clone())
+            .await?;
 
         visited_page_urls.insert(toc_url.to_string());
 
         // Add first page chapters with deduplication
-        for ch in chapters {
+        for mut ch in chapters {
             if seen_chapter_urls.contains(&ch.url) {
                 continue;
             }
             seen_chapter_urls.insert(ch.url.clone());
-            all_chapters.push(BookChapter {
-                title: ch.title,
-                url: ch.url,
-                index: chapter_index,
-                ..Default::default()
-            });
+            ch.index = chapter_index;
+            if ch.book_url.is_none() {
+                ch.book_url = Some(book.book_url.clone());
+            }
+            all_chapters.push(ch);
             chapter_index += 1;
         }
 
@@ -485,21 +741,28 @@ impl BookService {
                 visited_page_urls.insert(url.clone());
 
                 let res = self
-                    .fetch_source_url(user_ns, source, &url, &source.book_source_url)
+                    .fetch_source_url_with_bindings(
+                        user_ns,
+                        source,
+                        &url,
+                        base_url,
+                        bindings.clone(),
+                    )
                     .await?;
-                let (chapters, _) = self.parser.chapter_list(source, &res.body, &res.url);
+                let (chapters, _) = self
+                    .parse_chapter_list_response(source, res, bindings.clone())
+                    .await?;
 
-                for ch in chapters {
+                for mut ch in chapters {
                     if seen_chapter_urls.contains(&ch.url) {
                         continue;
                     }
                     seen_chapter_urls.insert(ch.url.clone());
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
+                    ch.index = chapter_index;
+                    if ch.book_url.is_none() {
+                        ch.book_url = Some(book.book_url.clone());
+                    }
+                    all_chapters.push(ch);
                     chapter_index += 1;
                 }
             }
@@ -513,21 +776,28 @@ impl BookService {
                 visited_page_urls.insert(current_url.clone());
 
                 let res = self
-                    .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
+                    .fetch_source_url_with_bindings(
+                        user_ns,
+                        source,
+                        &current_url,
+                        base_url,
+                        bindings.clone(),
+                    )
                     .await?;
-                let (chapters, next_urls) = self.parser.chapter_list(source, &res.body, &res.url);
+                let (chapters, next_urls) = self
+                    .parse_chapter_list_response(source, res, bindings.clone())
+                    .await?;
 
-                for ch in chapters {
+                for mut ch in chapters {
                     if seen_chapter_urls.contains(&ch.url) {
                         continue;
                     }
                     seen_chapter_urls.insert(ch.url.clone());
-                    all_chapters.push(BookChapter {
-                        title: ch.title,
-                        url: ch.url,
-                        index: chapter_index,
-                        ..Default::default()
-                    });
+                    ch.index = chapter_index;
+                    if ch.book_url.is_none() {
+                        ch.book_url = Some(book.book_url.clone());
+                    }
+                    all_chapters.push(ch);
                     chapter_index += 1;
                 }
 
@@ -545,13 +815,16 @@ impl BookService {
         Ok((all_chapters, visited_page_urls.into_iter().collect()))
     }
 
-    pub async fn get_content(
+    pub async fn get_content_for_chapter(
         &self,
         user_ns: &str,
-        book_url: &str,
         source: &BookSource,
-        chapter_url: &str,
+        book: &Book,
+        chapter: &BookChapter,
+        next_chapter_url: Option<&str>,
     ) -> Result<String, AppError> {
+        let book_url = &book.book_url;
+        let chapter_url = &chapter.url;
         let book_key = md5_hex(book_url);
         tracing::debug!(
             "get_content called, chapter_url={}, book_key={}",
@@ -567,6 +840,13 @@ impl BookService {
         let mut all_content = String::new();
         let mut visited_urls = std::collections::HashSet::new();
         let mut current_url = chapter_url.to_string();
+        let bindings = legado_js_bindings(Some(book), Some(chapter), next_chapter_url);
+        let base_url = book
+            .toc_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!book.book_url.trim().is_empty()).then_some(book.book_url.as_str()))
+            .unwrap_or(source.book_source_url.as_str());
 
         // Follow pagination to get all content pages
         loop {
@@ -578,10 +858,18 @@ impl BookService {
 
             tracing::debug!("get_content fetching: {}", current_url);
             let res = self
-                .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
+                .fetch_source_url_with_bindings(
+                    user_ns,
+                    source,
+                    &current_url,
+                    base_url,
+                    bindings.clone(),
+                )
                 .await?;
             tracing::debug!("get_content fetch done, body len={}", res.body.len());
-            let content = self.parser.content(source, &res.body, &res.url);
+            let (content, next_url) = self
+                .parse_content_response(source, res, bindings.clone())
+                .await?;
             tracing::debug!("get_content parsed content len={}", content.len());
 
             if !content.is_empty() {
@@ -592,7 +880,7 @@ impl BookService {
             }
 
             // Check for next page
-            if let Some(next_url) = self.parser.next_content_url(source, &res.body, &res.url) {
+            if let Some(next_url) = next_url {
                 tracing::debug!("get_content found next_url: {}", next_url);
                 if should_follow_content_page(chapter_url, &current_url, &next_url) {
                     current_url = next_url;
@@ -657,6 +945,64 @@ impl BookService {
             .max_by_key(progress_rank))
     }
 
+    /// Conditionally update reading progress and advance its server revision.
+    ///
+    /// `expected_revision = None` keeps older clients working with last-write-wins
+    /// semantics. Revision-aware clients send the revision returned by the most
+    /// recent read/write; a stale request is rejected without changing the file.
+    pub async fn save_reading_progress(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        expected_revision: Option<i64>,
+        update: ReadingProgressUpdate,
+    ) -> Result<ReadingProgressSaveResult, AppError> {
+        let write_lock = self.bookshelf_write_lock(user_ns).await;
+        let _write_guard = write_lock.lock().await;
+        let mut list = self.read_bookshelf(user_ns).await?;
+        let Some(index) = list
+            .iter()
+            .enumerate()
+            .filter(|(_, book)| book.book_url == book_url)
+            .max_by_key(|(_, book)| progress_rank(book))
+            .map(|(index, _)| index)
+        else {
+            return Err(AppError::BadRequest("书籍未加入书架".to_string()));
+        };
+
+        let current_revision = list[index].progress_revision.unwrap_or(0).max(0);
+        if expected_revision.is_some_and(|revision| revision != current_revision) {
+            return Ok(ReadingProgressSaveResult {
+                accepted: false,
+                book: list[index].clone(),
+            });
+        }
+
+        let book = &mut list[index];
+        book.dur_chapter_index = Some(update.index);
+        book.dur_chapter_time = Some(update.updated_at);
+        if let Some(position) = update.position {
+            book.dur_chapter_pos = Some(position);
+        }
+        if let Some(chapter_title) = update.chapter_title {
+            book.dur_chapter_title = Some(chapter_title);
+        }
+        if let Some(total_chapter_num) = update.total_chapter_num {
+            book.total_chapter_num = Some(total_chapter_num);
+        }
+        if let Some(latest_chapter_title) = update.latest_chapter_title {
+            book.latest_chapter_title = Some(latest_chapter_title);
+        }
+        book.progress_revision = Some(current_revision.saturating_add(1));
+        let updated = book.clone();
+
+        self.write_bookshelf(user_ns, &list).await?;
+        Ok(ReadingProgressSaveResult {
+            accepted: true,
+            book: updated,
+        })
+    }
+
     /// Find book by chapter URL (chapter URL typically shares domain with book URL)
     pub async fn get_shelf_book_by_chapter(
         &self,
@@ -719,6 +1065,8 @@ impl BookService {
     }
 
     pub async fn save_book(&self, user_ns: &str, mut book: Book) -> Result<Book, AppError> {
+        let write_lock = self.bookshelf_write_lock(user_ns).await;
+        let _write_guard = write_lock.lock().await;
         sanitize_book_urls(&mut book);
         if book.origin.trim().is_empty() {
             return Err(AppError::BadRequest("missing origin".to_string()));
@@ -750,6 +1098,24 @@ impl BookService {
             if book.dur_chapter_pos.is_none() {
                 book.dur_chapter_pos = exist.dur_chapter_pos;
             }
+            let progress_changed = book.dur_chapter_index != exist.dur_chapter_index
+                || book.dur_chapter_pos != exist.dur_chapter_pos
+                || book.dur_chapter_time != exist.dur_chapter_time
+                || book.dur_chapter_title != exist.dur_chapter_title;
+            // Legacy saveBook clients may still carry progress. Advance the
+            // server token for a real change, but never trust/roll back a token
+            // supplied as part of a general Book payload.
+            book.progress_revision = if progress_changed {
+                Some(
+                    exist
+                        .progress_revision
+                        .unwrap_or(0)
+                        .max(0)
+                        .saturating_add(1),
+                )
+            } else {
+                exist.progress_revision
+            };
             if book.total_chapter_num.is_none() {
                 book.total_chapter_num = exist.total_chapter_num;
             }
@@ -769,6 +1135,8 @@ impl BookService {
     }
 
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
+        let write_lock = self.bookshelf_write_lock(user_ns).await;
+        let _write_guard = write_lock.lock().await;
         let existing = self.read_bookshelf(user_ns).await?;
         let mut normalized: Vec<Book> = Vec::with_capacity(books.len());
         for mut book in books {
@@ -803,6 +1171,8 @@ impl BookService {
     }
 
     pub async fn delete_book(&self, user_ns: &str, book: &Book) -> Result<bool, AppError> {
+        let write_lock = self.bookshelf_write_lock(user_ns).await;
+        let _write_guard = write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let orig_len = list.len();
         let removed: Vec<Book> = list
@@ -822,6 +1192,8 @@ impl BookService {
     }
 
     pub async fn delete_books(&self, user_ns: &str, books: Vec<Book>) -> Result<usize, AppError> {
+        let write_lock = self.bookshelf_write_lock(user_ns).await;
+        let _write_guard = write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut deleted = 0usize;
         let mut removed_books: Vec<Book> = Vec::new();
@@ -863,20 +1235,23 @@ impl BookService {
         Ok(count)
     }
 
-    pub async fn cache_chapter(
+    pub async fn cache_chapter_for_book(
         &self,
         user_ns: &str,
-        book_url: &str,
         source: &BookSource,
-        chapter_url: &str,
+        book: &Book,
+        chapter: &BookChapter,
+        next_chapter_url: Option<&str>,
         refresh: bool,
     ) -> Result<(), AppError> {
+        let book_url = &book.book_url;
+        let chapter_url = &chapter.url;
         let book_key = md5_hex(book_url);
         if refresh {
             let _ = self.cache.remove(user_ns, &book_key, chapter_url).await;
         }
         let _ = self
-            .get_content(user_ns, book_url, source, chapter_url)
+            .get_content_for_chapter(user_ns, source, book, chapter, next_chapter_url)
             .await?;
         Ok(())
     }
@@ -1129,6 +1504,93 @@ impl BookService {
     }
 }
 
+fn legado_js_bindings(
+    book: Option<&Book>,
+    chapter: Option<&BookChapter>,
+    next_chapter_url: Option<&str>,
+) -> HashMap<String, serde_json::Value> {
+    let mut bindings = HashMap::new();
+    if let Some(book) = book {
+        bindings.insert(
+            "book".to_string(),
+            serde_json::to_value(book).unwrap_or_default(),
+        );
+    }
+    if let Some(chapter) = chapter {
+        bindings.insert(
+            "chapter".to_string(),
+            serde_json::to_value(chapter).unwrap_or_default(),
+        );
+        bindings.insert("title".to_string(), json!(chapter.title));
+    }
+    bindings.insert(
+        "nextChapterUrl".to_string(),
+        json!(next_chapter_url.unwrap_or_default()),
+    );
+    bindings
+}
+
+fn preserve_book_context(parsed: &mut Book, input: &Book, source_url: &str) {
+    if parsed.name.trim().is_empty() {
+        parsed.name = input.name.clone();
+    }
+    if parsed.author.trim().is_empty() {
+        parsed.author = input.author.clone();
+    }
+    if parsed.book_url.trim().is_empty() {
+        parsed.book_url = input.book_url.clone();
+    }
+    if parsed.origin.trim().is_empty() {
+        parsed.origin = if input.origin.trim().is_empty() {
+            source_url.to_string()
+        } else {
+            input.origin.clone()
+        };
+    }
+    macro_rules! preserve_optional {
+        ($field:ident) => {
+            if parsed.$field.is_none() {
+                parsed.$field = input.$field.clone();
+            }
+        };
+    }
+    preserve_optional!(origin_name);
+    preserve_optional!(cover_url);
+    preserve_optional!(toc_url);
+    preserve_optional!(charset);
+    preserve_optional!(custom_cover_url);
+    preserve_optional!(can_update);
+    preserve_optional!(dur_chapter_index);
+    preserve_optional!(dur_chapter_pos);
+    preserve_optional!(dur_chapter_time);
+    preserve_optional!(dur_chapter_title);
+    preserve_optional!(progress_revision);
+    preserve_optional!(intro);
+    preserve_optional!(latest_chapter_title);
+    preserve_optional!(last_check_time);
+    preserve_optional!(total_chapter_num);
+    preserve_optional!(r#type);
+    preserve_optional!(group);
+    preserve_optional!(word_count);
+    preserve_optional!(info_html);
+    preserve_optional!(toc_html);
+    preserve_optional!(kind);
+    preserve_optional!(update_time);
+    preserve_optional!(can_re_name);
+    preserve_optional!(download_urls);
+    preserve_optional!(variable);
+}
+
+async fn run_parser_blocking<T, F>(task: F) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|err| AppError::Internal(anyhow::anyhow!("book source parser task failed: {err}")))
+}
+
 fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchResponse {
     let Some(script) = source
         .login_check_js
@@ -1138,7 +1600,7 @@ fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchRespons
         return res;
     };
 
-    with_js_lib(source.js_lib.as_deref(), || {
+    with_js_source(source, || {
         let str_response = StrResponse::from(res.clone());
         let mut bindings = HashMap::new();
         bindings.insert(
@@ -1179,7 +1641,7 @@ fn parse_explore_kinds(source: &BookSource) -> Result<Vec<ExploreKind>, AppError
         return Ok(Vec::new());
     };
 
-    let text = with_js_lib(source.js_lib.as_deref(), || {
+    let text = with_js_source(source, || {
         if let Some(script) = raw.strip_prefix("@js:") {
             eval_js(script, "", &source.book_source_url).map_err(AppError::Internal)
         } else if let Some(script) = raw
@@ -1267,6 +1729,389 @@ fn parse_window_rate(rate: &str) -> Option<(usize, u64)> {
     let limit = limit.trim().parse().ok()?;
     let window = window.trim().parse().ok()?;
     Some((limit, window))
+}
+
+fn parse_login_ui(source: &BookSource) -> Option<serde_json::Value> {
+    let raw = source.login_ui.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if let Some(encoded) = value.as_str() {
+        value = serde_json::from_str(encoded).ok()?;
+    }
+    value.as_array().is_some().then_some(value)
+}
+
+fn login_ui_action_allowed(login_ui: &serde_json::Value, action: &str) -> bool {
+    login_ui
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|item| item.get("action").and_then(serde_json::Value::as_str) == Some(action))
+}
+
+fn targeted_login_action_script(login_script: &str, action: &str) -> Option<String> {
+    let name = action.strip_suffix("()")?.trim();
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic())
+        || !chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let marker = format!("function {name}");
+    let start = login_script.find(&marker)?;
+    let open = login_script[start..].find('{')? + start;
+    let close = find_matching_delimiter(login_script, open, '{', '}')?;
+    Some(format!("{}\n;({action});", &login_script[start..=close]))
+}
+
+fn execute_compatible_browser_action(
+    source: &BookSource,
+    login_script: &str,
+    action: &str,
+) -> bool {
+    let Some(targeted_script) = targeted_login_action_script(login_script, action) else {
+        return false;
+    };
+    let Some(expression) = extract_start_browser_argument(&targeted_script) else {
+        return false;
+    };
+    let Some(target) = eval_login_action_url_expression(&expression, source) else {
+        return false;
+    };
+    let base = login_runtime_base_url(source);
+    let Ok(url) = url::Url::parse(&normalize_source_url(&base)).and_then(|base| base.join(&target))
+    else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    source.runtime.push_browser_url(url.to_string());
+    true
+}
+
+fn eval_login_action_url_expression(expression: &str, source: &BookSource) -> Option<String> {
+    let base = login_runtime_base_url(source);
+    let login_header = source.runtime.snapshot().login_header;
+    let encoded_key = (!login_header.trim().is_empty())
+        .then(|| base64::engine::general_purpose::STANDARD.encode(login_header.trim().as_bytes()));
+    let mut output = String::new();
+    for part in split_js_concat(expression) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if matches!(
+            part,
+            "source.bookSourceUrl"
+                | "String(source.bookSourceUrl)"
+                | "baseUrl"
+                | "host"
+                | "getServerHost()"
+        ) {
+            output.push_str(&base);
+            continue;
+        }
+        if part == "getSecretKey()" {
+            output.push_str(encoded_key.as_deref()?);
+            continue;
+        }
+        if let Some(value) = decode_js_string_literal(part) {
+            output.push_str(&value);
+            continue;
+        }
+        return None;
+    }
+    (!output.trim().is_empty()).then_some(output)
+}
+
+fn login_runtime_base_url(source: &BookSource) -> String {
+    let runtime = source.runtime.snapshot();
+    serde_json::from_str::<serde_json::Value>(&runtime.variable)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_array()?
+                .first()?
+                .get("host")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .filter(|host| !host.trim().is_empty())
+        .unwrap_or_else(|| source.book_source_url.clone())
+}
+
+fn execute_compatible_form_login(
+    source: &BookSource,
+    login_info: &HashMap<String, String>,
+) -> Option<bool> {
+    let script = source.login_url.as_deref()?;
+    if !script.contains("putLoginHeader")
+        || !script.contains("api_key")
+        || !script.contains("/login")
+    {
+        return None;
+    }
+
+    let email = login_info_value(login_info, &["邮箱", "email"]).unwrap_or_default();
+    let password = login_info_value(login_info, &["密码", "password"]).unwrap_or_default();
+    if email.trim().is_empty() || password.is_empty() {
+        source
+            .runtime
+            .push_notice("请先填写账号和密码后登录".to_string());
+        return Some(false);
+    }
+
+    let targets = compatible_login_targets(source, script);
+    if targets.is_empty() {
+        source.runtime.push_notice(
+            "已阻止通过 HTTP 明文发送账号密码，请切换到 HTTPS 服务器后重试".to_string(),
+        );
+        return Some(false);
+    }
+
+    source.runtime.push_notice("正在登录...".to_string());
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            source.runtime.push_notice("登录请求初始化失败".to_string());
+            return Some(false);
+        }
+    };
+    let headers = with_js_source(source, || {
+        crate::crawler::url_analyzer::source_header_spec(source)
+    })
+    .map(|spec| spec.headers)
+    .unwrap_or_default();
+
+    for target in targets {
+        let mut request = client.post(target.clone());
+        for (name, value) in &headers {
+            request = request.header(name, value);
+        }
+        let response = match request
+            .form(&[("email", email), ("password", password)])
+            .send()
+        {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        let status = response.status();
+        let value = response
+            .text()
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+        let Some(value) = value else {
+            if status.is_server_error() {
+                continue;
+            }
+            source
+                .runtime
+                .push_notice("登录服务器返回了无法识别的数据".to_string());
+            return Some(false);
+        };
+        let code_ok = value
+            .get("code")
+            .and_then(|code| {
+                code.as_i64()
+                    .map(|code| code == 200)
+                    .or_else(|| code.as_str().map(|code| code == "200"))
+            })
+            .unwrap_or(false);
+        let api_key = value
+            .pointer("/data/user/api_key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if code_ok && api_key.len() >= 10 {
+            source.runtime.set_login_header(api_key.to_string());
+            set_runtime_login_host(source, &target);
+            let nickname = value
+                .pointer("/data/user/nickname")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("用户");
+            source
+                .runtime
+                .push_notice(format!("登录成功，欢迎回来，{nickname}"));
+            return Some(true);
+        }
+        let message = value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or("账号、密码或服务状态异常");
+        source.runtime.push_notice(format!("登录失败：{message}"));
+        return Some(false);
+    }
+
+    source
+        .runtime
+        .push_notice("连接登录服务器失败，请检查网络或切换服务器".to_string());
+    Some(false)
+}
+
+fn compatible_login_targets(source: &BookSource, script: &str) -> Vec<url::Url> {
+    let configured = login_runtime_base_url(source);
+    let source_url = url::Url::parse(&normalize_source_url(&source.book_source_url)).ok();
+    let trusted_host = source_url.as_ref().and_then(url::Url::host_str);
+    let mut bases = vec![configured];
+    bases.extend(extract_login_hosts(script));
+
+    let mut targets = Vec::new();
+    for base in bases {
+        let Ok(base) = url::Url::parse(&normalize_source_url(&base)) else {
+            continue;
+        };
+        if base.scheme() != "https" {
+            continue;
+        }
+        let Some(host) = base.host_str() else {
+            continue;
+        };
+        if trusted_host.is_some_and(|trusted| !login_host_is_trusted(trusted, host)) {
+            continue;
+        }
+        let Ok(target) = base.join("/login") else {
+            continue;
+        };
+        if !targets.iter().any(|known: &url::Url| known == &target) {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+fn login_host_is_trusted(source_host: &str, candidate_host: &str) -> bool {
+    if source_host.eq_ignore_ascii_case(candidate_host) {
+        return true;
+    }
+    let Some((_, suffix)) = source_host.split_once('.') else {
+        return false;
+    };
+    suffix.contains('.')
+        && candidate_host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", suffix.to_ascii_lowercase()))
+}
+
+fn extract_login_hosts(script: &str) -> Vec<String> {
+    let Some(marker) = ["var hosts", "let hosts", "const hosts"]
+        .into_iter()
+        .find_map(|marker| script.find(marker))
+    else {
+        return Vec::new();
+    };
+    let Some(open) = script[marker..].find('[').map(|open| open + marker) else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_delimiter(script, open, '[', ']') else {
+        return Vec::new();
+    };
+    extract_js_string_literals(&script[open + 1..close])
+}
+
+fn extract_js_string_literals(value: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut quote_start = None;
+    let mut quote = '\0';
+    let mut escaped = false;
+    for (idx, ch) in value.char_indices() {
+        if let Some(start) = quote_start {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                if let Some(decoded) = decode_js_string_literal(&value[start..=idx]) {
+                    values.push(decoded);
+                }
+                quote_start = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote_start = Some(idx);
+            quote = ch;
+        }
+    }
+    values
+}
+
+fn set_runtime_login_host(source: &BookSource, target: &url::Url) {
+    let host = target.origin().ascii_serialization();
+    let runtime = source.runtime.shared();
+    let mut state = runtime.lock().unwrap_or_else(|err| err.into_inner());
+    let mut value = serde_json::from_str::<serde_json::Value>(&state.variable)
+        .unwrap_or_else(|_| serde_json::json!([{}]));
+    if !value.is_array() {
+        value = serde_json::json!([{}]);
+    }
+    let Some(config) = value
+        .as_array_mut()
+        .and_then(|items| items.first_mut())
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    config.insert("host".to_string(), serde_json::Value::String(host));
+    state.variable = value.to_string();
+}
+
+fn login_info_value<'a>(
+    login_info: &'a HashMap<String, String>,
+    names: &[&str],
+) -> Option<&'a str> {
+    login_info.iter().find_map(|(key, value)| {
+        names
+            .iter()
+            .any(|name| key.eq_ignore_ascii_case(name))
+            .then_some(value.as_str())
+    })
+}
+
+fn redact_login_notice(
+    message: &str,
+    login_info: &HashMap<String, String>,
+    login_header: &str,
+) -> String {
+    let mut redacted = message.to_string();
+    for (key, value) in login_info {
+        let sensitive = ["密码", "password", "token", "密钥"].iter().any(|marker| {
+            key.to_ascii_lowercase()
+                .contains(&marker.to_ascii_lowercase())
+        });
+        if sensitive && value.trim().len() >= 4 {
+            redacted = redacted.replace(value, "***");
+        }
+    }
+    if login_header.trim().len() >= 4 {
+        redacted = redacted.replace(login_header, "***");
+    }
+    redacted
+}
+
+fn runtime_has_login(state: &BookSourceRuntimeState) -> bool {
+    state.login_header.trim().len() >= 10
+        || state.cookies.values().any(|cookie| {
+            cookie.split(';').any(|pair| {
+                let Some((name, value)) = pair.trim().split_once('=') else {
+                    return false;
+                };
+                let name = name.to_ascii_lowercase();
+                value.trim().len() >= 4
+                    && ["token", "session", "auth"]
+                        .iter()
+                        .any(|marker| name.contains(marker))
+            })
+        })
 }
 
 fn resolve_login_preview_target(source: &BookSource) -> Result<Option<String>, AppError> {
@@ -1764,8 +2609,11 @@ fn progress_updated_at(book: &Book) -> i64 {
     book.dur_chapter_time.unwrap_or(0)
 }
 
-fn progress_rank(book: &Book) -> i64 {
-    progress_updated_at(book)
+fn progress_rank(book: &Book) -> (i64, i64) {
+    (
+        book.progress_revision.unwrap_or(0).max(0),
+        progress_updated_at(book),
+    )
 }
 
 fn preserve_newer_reading_progress(existing: &Book, incoming: &mut Book) {
@@ -1776,6 +2624,7 @@ fn preserve_newer_reading_progress(existing: &Book, incoming: &mut Book) {
     incoming.dur_chapter_pos = existing.dur_chapter_pos;
     incoming.dur_chapter_time = existing.dur_chapter_time;
     incoming.dur_chapter_title = existing.dur_chapter_title.clone();
+    incoming.progress_revision = existing.progress_revision;
 }
 
 fn recover_bookshelf_entries(data: &str) -> Option<Vec<Book>> {
@@ -1879,6 +2728,146 @@ mod tests {
             dur_chapter_title: Some(format!("第{}章", chapter_index + 1)),
             ..Default::default()
         }
+    }
+
+    fn progress_update(index: i32, position: i32, updated_at: i64) -> ReadingProgressUpdate {
+        ReadingProgressUpdate {
+            index,
+            position: Some(position),
+            updated_at,
+            chapter_title: Some(format!("第{}章", index + 1)),
+            total_chapter_num: Some(100),
+            latest_chapter_title: Some("第100章".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_reading_progress_rejects_stale_revision() {
+        let (service, storage_dir) = test_book_service("progress-revision");
+        let user_ns = "progress-revision-user";
+        let book_url = "https://book.example/1";
+        service
+            .save_book(user_ns, test_book(0, 0, 1000))
+            .await
+            .unwrap();
+
+        let accepted = service
+            .save_reading_progress(user_ns, book_url, Some(0), progress_update(3, 4200, 2000))
+            .await
+            .unwrap();
+        let stale = service
+            .save_reading_progress(user_ns, book_url, Some(0), progress_update(1, 1000, 3000))
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert!(accepted.accepted);
+        assert_eq!(accepted.book.progress_revision, Some(1));
+        assert!(!stale.accepted);
+        assert_eq!(stale.book.progress_revision, Some(1));
+        assert_eq!(stale.book.dur_chapter_index, Some(3));
+        assert_eq!(stale.book.dur_chapter_pos, Some(4200));
+    }
+
+    #[tokio::test]
+    async fn concurrent_progress_updates_accept_only_one_matching_revision() {
+        let (service, storage_dir) = test_book_service("concurrent-progress-revision");
+        let user_ns = "concurrent-progress-revision-user";
+        let book_url = "https://book.example/1";
+        service
+            .save_book(user_ns, test_book(0, 0, 1000))
+            .await
+            .unwrap();
+
+        let first = service.save_reading_progress(
+            user_ns,
+            book_url,
+            Some(0),
+            progress_update(4, 4000, 2000),
+        );
+        let second = service.save_reading_progress(
+            user_ns,
+            book_url,
+            Some(0),
+            progress_update(7, 7000, 2001),
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        let accepted_count = usize::from(first.accepted) + usize::from(second.accepted);
+        let saved = service
+            .get_shelf_book(user_ns, book_url)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(accepted_count, 1);
+        assert_eq!(saved.progress_revision, Some(1));
+        assert!(matches!(saved.dur_chapter_index, Some(4 | 7)));
+    }
+
+    #[tokio::test]
+    async fn legacy_progress_update_without_revision_remains_supported() {
+        let (service, storage_dir) = test_book_service("legacy-progress-revision");
+        let user_ns = "legacy-progress-revision-user";
+        let book_url = "https://book.example/1";
+        service
+            .save_book(user_ns, test_book(0, 0, 1000))
+            .await
+            .unwrap();
+
+        let first = service
+            .save_reading_progress(user_ns, book_url, None, progress_update(2, 2000, 2000))
+            .await
+            .unwrap();
+        let second = service
+            .save_reading_progress(user_ns, book_url, None, progress_update(5, 5000, 3000))
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert!(first.accepted);
+        assert_eq!(first.book.progress_revision, Some(1));
+        assert!(second.accepted);
+        assert_eq!(second.book.progress_revision, Some(2));
+        assert_eq!(second.book.dur_chapter_index, Some(5));
+    }
+
+    #[tokio::test]
+    async fn general_book_save_cannot_roll_back_progress_revision() {
+        let (service, storage_dir) = test_book_service("book-save-progress-revision");
+        let user_ns = "book-save-progress-revision-user";
+        let book_url = "https://book.example/1";
+        service
+            .save_book(user_ns, test_book(0, 0, 1000))
+            .await
+            .unwrap();
+        let progress = service
+            .save_reading_progress(user_ns, book_url, Some(0), progress_update(2, 2000, 2000))
+            .await
+            .unwrap()
+            .book;
+
+        let mut metadata_edit = progress.clone();
+        metadata_edit.name = "同步书（改名）".to_string();
+        metadata_edit.progress_revision = Some(0);
+        let metadata_saved = service.save_book(user_ns, metadata_edit).await.unwrap();
+        assert_eq!(metadata_saved.progress_revision, Some(1));
+
+        let mut legacy_progress_edit = metadata_saved;
+        legacy_progress_edit.dur_chapter_index = Some(4);
+        legacy_progress_edit.dur_chapter_pos = Some(4000);
+        legacy_progress_edit.dur_chapter_time = Some(3000);
+        legacy_progress_edit.progress_revision = Some(0);
+        let progress_saved = service
+            .save_book(user_ns, legacy_progress_edit)
+            .await
+            .unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&storage_dir).await;
+        assert_eq!(progress_saved.progress_revision, Some(2));
+        assert_eq!(progress_saved.dur_chapter_index, Some(4));
     }
 
     #[tokio::test]
@@ -2063,5 +3052,229 @@ mod tests {
         let login_target = resolve_login_preview_target(&source).unwrap();
 
         assert_eq!(login_target.as_deref(), Some("https://v1.vossc.com/login"));
+    }
+
+    #[test]
+    fn legado_login_action_updates_runtime_state() {
+        let (service, storage_dir) = test_book_service("legado-login-action");
+        let source = BookSource {
+            book_source_name: "Aggregate".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            login_url: Some(
+                r#"
+function login() {
+  const info = source.getLoginInfoMap();
+  source.putLoginHeader(info["邮箱"] + "-saved-key");
+  source.setVariable('[{"host":"https://source.example"}]');
+  java.toast("登录成功");
+}
+"#
+                .to_string(),
+            ),
+            login_ui: Some(
+                r#"[
+  {"name":"邮箱","type":"text"},
+  {"name":"密码","type":"password"},
+  {"name":"登录","type":"button","action":"login()"}
+]"#
+                .to_string(),
+            ),
+            ..Default::default()
+        };
+        let login_info = HashMap::from([
+            ("邮箱".to_string(), "reader@example.com".to_string()),
+            ("密码".to_string(), "secret".to_string()),
+            ("未声明字段".to_string(), "ignored".to_string()),
+        ]);
+
+        let result = service
+            .execute_book_source_login_action(&source, login_info, "login()")
+            .unwrap();
+        let runtime = source.runtime.snapshot();
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+        assert_eq!(runtime.login_header, "reader@example.com-saved-key");
+        assert_eq!(runtime.variable, r#"[{"host":"https://source.example"}]"#);
+        assert_eq!(runtime.login_info.get("未声明字段"), None);
+        assert_eq!(runtime.login_info.get("密码"), None);
+        assert_eq!(
+            runtime.login_info.get("邮箱"),
+            Some(&"reader@example.com".to_string())
+        );
+        assert_eq!(result["loggedIn"], true);
+        assert_eq!(result["messages"][0], "登录成功");
+    }
+
+    #[test]
+    fn legado_login_action_exposes_form_values_as_global_result() {
+        let (service, storage_dir) = test_book_service("legado-login-global-result");
+        let source = BookSource {
+            book_source_name: "Aggregate".to_string(),
+            book_source_url: "光遇聚合".to_string(),
+            login_url: Some(
+                r#"
+function login(flag) {
+  if (!result.邮箱 || !result.密码) {
+    java.toast("请先输入账号密码！");
+    return false;
+  }
+  java.toast(result.邮箱);
+  return true;
+}
+"#
+                .to_string(),
+            ),
+            login_ui: Some(
+                r#"[
+  {"name":"邮箱","type":"text"},
+  {"name":"密码","type":"password"},
+  {"name":"登录","type":"button","action":"login(true)"}
+]"#
+                .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let result = service
+            .execute_book_source_login_action(
+                &source,
+                HashMap::from([
+                    ("邮箱".to_string(), "reader@example.com".to_string()),
+                    ("密码".to_string(), "secret".to_string()),
+                ]),
+                "login(true)",
+            )
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+        assert_eq!(result["success"], true);
+        assert_eq!(result["messages"][0], "reader@example.com");
+    }
+
+    #[test]
+    fn legado_login_action_rejects_unknown_action_but_keeps_form_values() {
+        let (service, storage_dir) = test_book_service("legado-login-invalid-action");
+        let source = BookSource {
+            book_source_name: "Aggregate".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            login_url: Some("function login() {}".to_string()),
+            login_ui: Some(
+                r#"[{"name":"邮箱","type":"text"},{"name":"登录","type":"button","action":"login()"}]"#
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let result = service.execute_book_source_login_action(
+            &source,
+            HashMap::from([("邮箱".to_string(), "reader@example.com".to_string())]),
+            "other()",
+        );
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+        assert_eq!(
+            source.runtime.snapshot().login_info.get("邮箱"),
+            Some(&"reader@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn legado_login_uses_form_fallback_when_vendor_script_cannot_parse() {
+        let (service, storage_dir) = test_book_service("legado-login-form-fallback");
+        let source = BookSource {
+            book_source_name: "Aggregate".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            login_url: Some(
+                r#"function login() {
+  const api_key = "";
+  source.putLoginHeader(api_key);
+  const unsupported = <;
+}
+// /login"#
+                    .to_string(),
+            ),
+            login_ui: Some(
+                r#"[
+  {"name":"邮箱","type":"text"},
+  {"name":"密码","type":"password"},
+  {"name":"登录","type":"button","action":"login()"}
+]"#
+                .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let result = service
+            .execute_book_source_login_action(
+                &source,
+                HashMap::from([("邮箱".to_string(), String::new())]),
+                "login()",
+            )
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+        assert_eq!(result["success"], false);
+        assert_eq!(result["loggedIn"], false);
+        assert!(result["messages"][0]
+            .as_str()
+            .is_some_and(|message| message.contains("填写账号")));
+    }
+
+    #[test]
+    fn legado_login_fallback_uses_only_https_sibling_hosts() {
+        let source = BookSource {
+            book_source_url: "https://v1.vossc.com".to_string(),
+            ..Default::default()
+        };
+        let targets = compatible_login_targets(
+            &source,
+            r#"
+var hosts = [
+  "https://v1.vossc.com",
+  "https://v2.vossc.com",
+  "http://v3.vossc.com",
+  "https://example.com"
+];
+"#,
+        );
+
+        assert_eq!(
+            targets
+                .into_iter()
+                .map(|url| url.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://v1.vossc.com/login".to_string(),
+                "https://v2.vossc.com/login".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn legado_login_runs_targeted_button_when_unrelated_vendor_code_cannot_parse() {
+        let (service, storage_dir) = test_book_service("legado-login-targeted-action");
+        let source = BookSource {
+            book_source_name: "Aggregate".to_string(),
+            book_source_url: "https://source.example".to_string(),
+            js_lib: Some("const unsupported_library = <;".to_string()),
+            login_url: Some(
+                r#"const unsupported = <;
+function key() {
+  java.startBrowserAwait(getServerHost() + "/key", "注册");
+}"#
+                .to_string(),
+            ),
+            login_ui: Some(r#"[{"name":"注册","type":"button","action":"key()"}]"#.to_string()),
+            ..Default::default()
+        };
+
+        let result = service
+            .execute_book_source_login_action(&source, HashMap::new(), "key()")
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(storage_dir);
+        assert_eq!(result["success"], true);
+        assert_eq!(result["openUrl"], "https://source.example/key");
     }
 }

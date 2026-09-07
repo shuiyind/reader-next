@@ -14,6 +14,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6" /></svg>
           <span>首页</span>
         </div>
+        <button
+          v-if="showAddToShelf"
+          type="button"
+          class="m-top-item shelf-action"
+          :disabled="addingToShelf"
+          @click="$emit('addToShelf')"
+        >
+          <svg v-if="addingToShelf" class="spinning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 0-9 9" /></svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /><path d="M12 7v6M9 10h6" /></svg>
+          <span>{{ addingToShelf ? '添加中' : '加书架' }}</span>
+        </button>
         <div class="m-top-item" :class="{ active: store.activePanel === 'bookshelf' }" @click="store.togglePanel('bookshelf')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
           <span>书架</span>
@@ -36,13 +47,29 @@
     <!-- Bottom Bar -->
     <Transition name="slide-up">
       <div v-show="show" class="m-bottom-bar">
-        <div class="progress-row" @click="$emit('progress')">
-          <div class="progress-track">
-            <!-- Mock slider for now -->
-            <div class="progress-fill" :style="{ width: store.readingProgress }"></div>
-            <div class="progress-thumb" :style="{ left: store.readingProgress }"></div>
-          </div>
-          <span class="page-text">第 1/1 页</span>
+        <div class="chapter-status-row" aria-live="polite">
+          <span class="chapter-status-title">
+            {{ store.currentChapter?.title || '正在加载章节' }}
+          </span>
+          <span class="chapter-status-count">
+            {{ store.chapters.length ? `第 ${store.currentIndex + 1} / ${store.chapters.length} 章` : '暂无目录' }}
+          </span>
+        </div>
+        <div class="progress-row">
+          <input
+            class="page-slider"
+            type="range"
+            min="1"
+            :max="normalizedTotalPages"
+            :value="normalizedCurrentPage"
+            :disabled="!horizontalPageMode || normalizedTotalPages <= 1"
+            :style="{ '--page-progress': `${normalizedPageProgress * 100}%` }"
+            aria-label="当前章节页码"
+            @input="handlePageInput"
+          />
+          <span class="page-text">
+            {{ horizontalPageMode ? `第 ${normalizedCurrentPage}/${normalizedTotalPages} 页` : store.readingProgress }}
+          </span>
         </div>
         <div class="nav-row">
           <div class="nav-btn" :class="{ disabled: !store.hasPrev }" @click="$emit('prev')">
@@ -129,14 +156,21 @@ const theme = computed(() => {
   return store.currentTheme
 })
 
-defineProps<{ 
+const props = defineProps<{
   show: boolean
   isSpeaking?: boolean
   isPaused?: boolean
+  showAddToShelf?: boolean
+  addingToShelf?: boolean
+  horizontalPageMode?: boolean
+  currentPage?: number
+  totalPages?: number
+  pageProgress?: number
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   goHome: []
+  addToShelf: []
   scrollTop: []
   scrollBottom: []
   prev: []
@@ -147,7 +181,21 @@ defineEmits<{
   ai: []
   tts: []
   progress: []
+  seekPage: [pageIndex: number]
 }>()
+
+const normalizedTotalPages = computed(() => Math.max(1, Math.floor(props.totalPages || 1)))
+const normalizedCurrentPage = computed(() => (
+  Math.max(1, Math.min(normalizedTotalPages.value, Math.floor(props.currentPage || 1)))
+))
+const normalizedPageProgress = computed(() => (
+  Math.max(0, Math.min(1, props.pageProgress || 0))
+))
+
+function handlePageInput(event: Event) {
+  const input = event.target as HTMLInputElement
+  emit('seekPage', Number(input.value) - 1)
+}
 </script>
 
 <style scoped>
@@ -192,6 +240,10 @@ defineEmits<{
   flex: 1 1 0;
   justify-content: center;
   padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
 }
 
 .m-top-item svg { width: 18px; height: 18px; }
@@ -199,6 +251,21 @@ defineEmits<{
   white-space: nowrap;
 }
 .m-top-item.active { opacity: 1; color: var(--color-primary, #c97f3a); }
+.m-top-item.shelf-action {
+  color: var(--color-primary, #c97f3a);
+  opacity: 1;
+}
+.m-top-item.shelf-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.m-top-item svg.spinning {
+  animation: mobile-control-spin 0.9s linear infinite;
+}
+
+@keyframes mobile-control-spin {
+  to { transform: rotate(360deg); }
+}
 
 .m-bottom-bar {
   position: absolute;
@@ -217,39 +284,95 @@ defineEmits<{
   pointer-events: auto;
 }
 
+.chapter-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chapter-status-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.chapter-status-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
 .progress-row {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.progress-track {
+.page-slider {
   flex: 1;
+  height: 18px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.page-slider::-webkit-slider-runnable-track {
   height: 4px;
-  background: rgba(0,0,0,0.1);
   border-radius: 2px;
-  position: relative;
+  background: linear-gradient(
+    to right,
+    var(--color-primary, #c97f3a) 0,
+    var(--color-primary, #c97f3a) var(--page-progress),
+    rgba(0, 0, 0, 0.1) var(--page-progress),
+    rgba(0, 0, 0, 0.1) 100%
+  );
 }
 
-.progress-fill {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
+.page-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid var(--color-primary, #c97f3a);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.page-slider::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.page-slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
   background: var(--color-primary, #c97f3a);
-  border-radius: 2px;
 }
 
-.progress-thumb {
-  position: absolute;
-  top: 50%;
-  transform: translate(-50%, -50%);
+.page-slider::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
   background: white;
   border: 2px solid var(--color-primary, #c97f3a);
   box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.page-slider:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .page-text {

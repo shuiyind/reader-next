@@ -1,4 +1,24 @@
 ﻿import { defineStore } from 'pinia'
+import {
+  defaultConfig,
+  loadConfig,
+  loadReaderColorStyle,
+  normalizeNumber,
+  themePresets,
+} from './reader/readerConfig'
+import type { ReadConfig, ReaderColorMode, ReaderColorStyle } from './reader/readerConfig'
+import { useReaderBackground } from './reader/useReaderBackground'
+
+export { fontPresets, themePresets } from './reader/readerConfig'
+export type {
+  ReadConfig,
+  ReaderBackgroundConfig,
+  ReaderBackgroundFit,
+  ReaderBackgroundPosition,
+  ReaderColorMode,
+  ReaderColorStyle,
+  ThemePreset,
+} from './reader/readerConfig'
 import { ref, computed, reactive, watch } from 'vue'
 import { useAppStore } from './app'
 import { useBookshelfStore } from './bookshelf'
@@ -6,10 +26,12 @@ import { useAiBookStore } from './aiBook'
 import {
   getChapterList,
   getBookContent,
+  getBookInfo,
   getShelfBook,
   saveBookProgress,
   setBookSource as apiSetBookSource,
 } from '../api/bookshelf'
+import type { SaveBookProgressResponse } from '../api/bookshelf'
 import {
   getBookmarks,
   saveBookmark,
@@ -25,10 +47,17 @@ import {
   DEFAULT_OPENAI_BASE_URL,
   requestOpenAISpeechAudio,
 } from '../utils/openaiSpeech'
+import { requestAzureSpeechAudio } from '../utils/azureSpeech'
 
 const READER_SESSION_KEY = 'reader-last-session'
 const READER_READ_HISTORY_PREFIX = 'reader-read-history:'
 const SERVER_PROGRESS_SCALE = 10000
+interface ServerProgressPayload {
+  bookUrl: string
+  index: number
+  position: number
+  revision: number
+}
 
 interface PersistedReaderSession {
   book: Book
@@ -37,146 +66,6 @@ interface PersistedReaderSession {
   chapterScrollProgress: number
   updatedAt: number
 }
-
-/* ─── Reading config type ─── */
-export interface ReadConfig {
-  fontSize: number
-  fontWeight: number
-  fontFamily: string
-  lineHeight: number
-  paragraphSpacing: number
-  firstLineIndent: boolean
-  fontColor: string
-  pageWidth: number
-  pageMode: 'auto' | 'mobile'
-  readMethod: '上下滑动' | '左右翻页' | '上下滚动' | '上下滚动2'
-  animateDuration: number
-  autoPageMode: 'pixel' | 'paragraph'
-  scrollPixel: number
-  pageSpeed: number
-  clickAction: 'next' | 'auto' | 'none'
-  selectAction: 'popup' | 'ignore'
-  chineseMode: 'simplified' | 'traditional'
-  specialMode: 'normal' | 'simple'
-  enablePreload: boolean
-  showAiPanel: boolean
-  enableChapterSummaryAuto: boolean
-  aiPanelLayout: 'auto' | 'side'
-  aiPanelSiderWidth: number
-  aiPanelFontSize: number
-  chapterSummaryKeyPointStyle: 'card' | 'list'
-  aiPanelActiveTab: 'summary' | 'relationships' | 'map' | 'settings'
-}
-
-const defaultConfig: ReadConfig = {
-  fontSize: 18,
-  fontWeight: 400,
-  fontFamily: 'system',
-  lineHeight: 1.8,
-  paragraphSpacing: 0.2,
-  firstLineIndent: true,
-  fontColor: '',
-  pageWidth: 800,
-  pageMode: 'auto',
-  readMethod: '上下滑动',
-  animateDuration: 300,
-  autoPageMode: 'pixel',
-  scrollPixel: 1,
-  pageSpeed: 1000,
-  clickAction: 'auto',
-  selectAction: 'ignore',
-  chineseMode: 'simplified',
-  specialMode: 'normal',
-  enablePreload: false,
-  showAiPanel: true,
-  enableChapterSummaryAuto: true,
-  aiPanelLayout: 'auto',
-  aiPanelSiderWidth: 360,
-  aiPanelFontSize: 16,
-  chapterSummaryKeyPointStyle: 'card',
-  aiPanelActiveTab: 'summary',
-}
-
-function loadConfig(): ReadConfig {
-  try {
-    const saved = localStorage.getItem('readConfig')
-    if (saved) return migrateLegacyReadConfig(JSON.parse(saved))
-  } catch { /* ignore */ }
-  return { ...defaultConfig }
-}
-
-function migrateLegacyReadConfig(saved: Partial<ReadConfig> & Record<string, unknown>): ReadConfig {
-  const normalized = { ...saved } as Record<string, unknown>
-  if (normalized.showAiPanel === undefined && normalized.showChapterSummary !== undefined) {
-    normalized.showAiPanel = normalized.showChapterSummary
-  }
-  if (normalized.aiPanelLayout === undefined && normalized.chapterSummaryLayout !== undefined) {
-    normalized.aiPanelLayout = normalized.chapterSummaryLayout
-  }
-  if (normalized.aiPanelSiderWidth === undefined && normalized.chapterSummarySiderWidth !== undefined) {
-    normalized.aiPanelSiderWidth = normalized.chapterSummarySiderWidth
-  }
-  if (normalized.aiPanelFontSize === undefined && normalized.chapterSummaryFontSize !== undefined) {
-    normalized.aiPanelFontSize = normalized.chapterSummaryFontSize
-  }
-  if (normalized.aiPanelActiveTab === undefined && normalized.chapterSummaryActiveTab !== undefined) {
-    normalized.aiPanelActiveTab = normalized.chapterSummaryActiveTab === 'content'
-      ? 'summary'
-      : normalized.chapterSummaryActiveTab
-  }
-  if (normalized.aiPanelActiveTab === 'content') {
-    normalized.aiPanelActiveTab = 'summary'
-  }
-  if (!['summary', 'relationships', 'map', 'settings'].includes(String(normalized.aiPanelActiveTab || ''))) {
-    normalized.aiPanelActiveTab = 'summary'
-  }
-  const merged = { ...defaultConfig, ...normalized } as ReadConfig
-  merged.fontSize = normalizeNumber(merged.fontSize, defaultConfig.fontSize, 1)
-  merged.fontWeight = normalizeNumber(merged.fontWeight, defaultConfig.fontWeight, 1)
-  merged.lineHeight = normalizeNumber(merged.lineHeight, defaultConfig.lineHeight, 0.1)
-  merged.paragraphSpacing = normalizeNumber(merged.paragraphSpacing, defaultConfig.paragraphSpacing, 0)
-  merged.pageWidth = normalizeNumber(merged.pageWidth, defaultConfig.pageWidth, 1)
-  merged.animateDuration = normalizeNumber(merged.animateDuration, defaultConfig.animateDuration, 0)
-  merged.scrollPixel = normalizeNumber(merged.scrollPixel, defaultConfig.scrollPixel, 1)
-  merged.pageSpeed = normalizeNumber(merged.pageSpeed, defaultConfig.pageSpeed, 1)
-  merged.aiPanelSiderWidth = normalizeNumber(merged.aiPanelSiderWidth, defaultConfig.aiPanelSiderWidth, 1)
-  merged.aiPanelFontSize = normalizeNumber(merged.aiPanelFontSize, defaultConfig.aiPanelFontSize, 1)
-  return merged
-}
-
-function normalizeNumber(value: unknown, fallback: number, min = Number.NEGATIVE_INFINITY) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= min ? value : fallback
-}
-
-/* ─── Theme presets ─── */
-export interface ThemePreset {
-  name: string
-  body: string
-  content: string
-  fontColor: string
-  popup: string
-}
-
-export const themePresets: ThemePreset[] = [
-  { name: '默认', body: '#f5ede4', content: '#fff9f0', fontColor: '#333', popup: '#fff' },
-  { name: '纯白', body: '#ffffff', content: '#ffffff', fontColor: '#333', popup: '#fff' },
-  { name: '琥珀', body: '#f5e6ce', content: '#faf0e4', fontColor: '#5b4636', popup: '#faf0e4' },
-  { name: '薄荷', body: '#e0f0e8', content: '#eaf5ef', fontColor: '#2d4a3e', popup: '#eaf5ef' },
-  { name: '天蓝', body: '#dce8f0', content: '#e8f0f6', fontColor: '#2c3e50', popup: '#e8f0f6' },
-  { name: '粉白', body: '#f5e4e8', content: '#faf0f3', fontColor: '#4a2d36', popup: '#faf0f3' },
-  { name: '浅灰', body: '#eaeaea', content: '#f5f5f5', fontColor: '#333', popup: '#f5f5f5' },
-  { name: '暗灰', body: '#808080', content: '#999', fontColor: '#eee', popup: '#888' },
-  { name: '暗夜', body: '#141414', content: '#16213e', fontColor: '#c8c8c8', popup: '#141414' },
-]
-
-/* ─── Font presets ─── */
-export const fontPresets = [
-  { label: '系统', value: 'system', family: '' },
-  { label: '黑体', value: 'heiti', family: '"SimHei", "STHeiti", "Heiti SC", sans-serif' },
-  { label: '楷体', value: 'kaiti', family: '"KaiTi", "STKaiti", "BiauKai", serif' },
-  { label: '宋体', value: 'songti', family: '"SimSun", "STSong", "Songti SC", serif' },
-  { label: '仿宋', value: 'fangsong', family: '"FangSong", "STFangsong", serif' },
-]
 
 interface TTSOptions {
   onStart?: () => void
@@ -187,20 +76,29 @@ interface TTSOptions {
 interface PreloadedOpenAIAudio {
   key: string
   blob: Blob
+  audio?: HTMLAudioElement
+  url?: string
 }
 
 const OPENAI_AUDIO_PRELOAD_LIMIT = 8
+const REMOTE_SPEECH_AUDIO_BUFFER_COUNT = 2
 
-export type SpeechProvider = 'system' | 'openai'
+export type SpeechProvider = 'system' | 'openai' | 'azure'
 export type OpenAISpeechSource = 'browser' | 'server'
 export type OpenAISpeechFormat = 'mp3' | 'wav' | 'opus' | 'flac' | 'pcm'
 export type OpenAISpeechRequestMode = 'chunked' | 'merged'
+export type AzureSpeechFormat =
+  | 'audio-24khz-48kbitrate-mono-mp3'
+  | 'audio-48khz-96kbitrate-mono-mp3'
+  | 'riff-24khz-16bit-mono-pcm'
+  | 'webm-24khz-16bit-mono-opus'
 
 interface SpeechConfig {
   provider: SpeechProvider
   voiceName: string
   speechRate: number
   speechPitch: number
+  speechVolume: number
   stopAfterMinutes: number
   openaiSource: OpenAISpeechSource
   openaiBaseUrl: string
@@ -209,6 +107,10 @@ interface SpeechConfig {
   openaiVoice: string
   openaiFormat: OpenAISpeechFormat
   openaiRequestMode: OpenAISpeechRequestMode
+  azureRegion: string
+  azureApiKey: string
+  azureVoice: string
+  azureFormat: AzureSpeechFormat
 }
 
 const defaultSpeechConfig: SpeechConfig = {
@@ -216,6 +118,7 @@ const defaultSpeechConfig: SpeechConfig = {
   voiceName: '',
   speechRate: 1,
   speechPitch: 1,
+  speechVolume: 1,
   stopAfterMinutes: 0,
   openaiSource: 'browser',
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
@@ -224,6 +127,10 @@ const defaultSpeechConfig: SpeechConfig = {
   openaiVoice: 'vivian',
   openaiFormat: 'mp3',
   openaiRequestMode: 'chunked',
+  azureRegion: '',
+  azureApiKey: '',
+  azureVoice: 'zh-CN-XiaoxiaoNeural',
+  azureFormat: 'audio-24khz-48kbitrate-mono-mp3',
 }
 
 function loadSpeechConfig(): SpeechConfig {
@@ -236,7 +143,7 @@ function loadSpeechConfig(): SpeechConfig {
 
 function migrateSpeechConfig(saved: Partial<SpeechConfig>): SpeechConfig {
   const merged = { ...defaultSpeechConfig, ...saved }
-  if (merged.provider !== 'system' && merged.provider !== 'openai') {
+  if (!['system', 'openai', 'azure'].includes(merged.provider)) {
     merged.provider = defaultSpeechConfig.provider
   }
   if (merged.openaiSource !== 'browser' && merged.openaiSource !== 'server') {
@@ -248,8 +155,32 @@ function migrateSpeechConfig(saved: Partial<SpeechConfig>): SpeechConfig {
   if (merged.openaiRequestMode !== 'chunked' && merged.openaiRequestMode !== 'merged') {
     merged.openaiRequestMode = defaultSpeechConfig.openaiRequestMode
   }
-  merged.speechRate = normalizeNumber(merged.speechRate, defaultSpeechConfig.speechRate, 0.5)
-  merged.speechPitch = normalizeNumber(merged.speechPitch, defaultSpeechConfig.speechPitch, 0.5)
+  if (![
+    'audio-24khz-48kbitrate-mono-mp3',
+    'audio-48khz-96kbitrate-mono-mp3',
+    'riff-24khz-16bit-mono-pcm',
+    'webm-24khz-16bit-mono-opus',
+  ].includes(merged.azureFormat)) {
+    merged.azureFormat = defaultSpeechConfig.azureFormat
+  }
+  merged.speechRate = normalizeNumber(
+    merged.speechRate,
+    defaultSpeechConfig.speechRate,
+    0.5,
+    merged.provider === 'azure' ? 2 : 3,
+  )
+  merged.speechPitch = normalizeNumber(
+    merged.speechPitch,
+    defaultSpeechConfig.speechPitch,
+    0.5,
+    merged.provider === 'azure' ? 1.5 : 2,
+  )
+  merged.speechVolume = normalizeNumber(
+    merged.speechVolume,
+    defaultSpeechConfig.speechVolume,
+    0,
+    1,
+  )
   merged.stopAfterMinutes = normalizeNumber(merged.stopAfterMinutes, defaultSpeechConfig.stopAfterMinutes, 0)
   return merged
 }
@@ -281,6 +212,10 @@ export const useReaderStore = defineStore('reader', () => {
   const readChapterKeys = ref<Set<string>>(new Set())
   const progressDirty = ref(false)
   const lastServerProgressKey = ref('')
+  const knownProgressRevisions = new Map<string, number>()
+  let progressChangeVersion = 0
+  let progressSaveQueue: Promise<void> = Promise.resolve()
+  let lastProgressConflictKey = ''
 
   const currentChapter = computed(() => chapters.value[currentIndex.value] || null)
   const hasNext = computed(() => currentIndex.value < chapters.value.length - 1)
@@ -332,25 +267,90 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   /* ─── Theme ─── */
-  const themeIndex = ref(parseInt(localStorage.getItem('reader-themeIndex') || '0'))
+  const storedThemeIndex = parseInt(localStorage.getItem('reader-themeIndex') || '0')
+  const themeIndex = ref(Number.isInteger(storedThemeIndex) && themePresets[storedThemeIndex]
+    ? storedThemeIndex
+    : 0)
+  const legacyDayTheme = themePresets[themeIndex.value] || themePresets[0]
+  const dayColorStyle = reactive(loadReaderColorStyle('reader-dayColorStyle', {
+    backgroundColor: legacyDayTheme.body,
+    textColor: legacyDayTheme.fontColor,
+  }))
+  const nightPreset = themePresets[themePresets.length - 1]
+  const nightColorStyle = reactive(loadReaderColorStyle('reader-nightColorStyle', {
+    backgroundColor: nightPreset.body,
+    textColor: nightPreset.fontColor,
+  }))
+  const themeMode = computed(() => appStore.themeMode)
   const isNight = computed({
     get: () => appStore.theme === 'dark',
     set: (value: boolean) => {
-      appStore.setTheme(value ? 'dark' : 'light')
+      appStore.setThemeMode(value ? 'dark' : 'light')
       localStorage.setItem('reader-isNight', String(value))
     },
   })
 
   const currentTheme = computed(() => {
-    if (isNight.value) return themePresets[themePresets.length - 1]
-    return themePresets[themeIndex.value] || themePresets[0]
+    const colors = isNight.value ? nightColorStyle : dayColorStyle
+    return {
+      name: isNight.value ? '夜间自定义' : '白天自定义',
+      body: colors.backgroundColor,
+      content: colors.backgroundColor,
+      popup: colors.backgroundColor,
+      fontColor: colors.textColor,
+    }
   })
 
+  const {
+    readerBackgroundConfig,
+    readerBackgroundUrl,
+    readerBackgroundLoaded,
+    readerBackgroundSyncState,
+    setReaderBackgroundImage,
+    clearReaderBackgroundImage,
+    updateReaderBackgroundConfig,
+  } = useReaderBackground()
+
   function setThemeIndex(idx: number) {
+    const preset = themePresets[idx]
+    if (!preset) return
     themeIndex.value = idx
-    isNight.value = false
+    dayColorStyle.backgroundColor = preset.body
+    dayColorStyle.textColor = preset.fontColor
+    persistReaderColorStyle('light')
+    appStore.setThemeMode('light')
     localStorage.setItem('reader-themeIndex', String(idx))
     localStorage.setItem('reader-isNight', 'false')
+  }
+
+  function setThemeMode(mode: 'system' | ReaderColorMode) {
+    appStore.setThemeMode(mode)
+    localStorage.setItem('reader-isNight', String(appStore.theme === 'dark'))
+  }
+
+  function persistReaderColorStyle(mode: ReaderColorMode) {
+    const colors = mode === 'dark' ? nightColorStyle : dayColorStyle
+    localStorage.setItem(`reader-${mode === 'dark' ? 'night' : 'day'}ColorStyle`, JSON.stringify(colors))
+  }
+
+  function updateReaderColor(mode: ReaderColorMode, key: keyof ReaderColorStyle, value: string) {
+    if (!value) return
+    const colors = mode === 'dark' ? nightColorStyle : dayColorStyle
+    colors[key] = value
+    persistReaderColorStyle(mode)
+  }
+
+  function applyThemePreset(mode: ReaderColorMode, idx: number) {
+    const preset = themePresets[idx]
+    if (!preset) return
+    const colors = mode === 'dark' ? nightColorStyle : dayColorStyle
+    colors.backgroundColor = preset.body
+    colors.textColor = preset.fontColor
+    if (mode === 'light') {
+      themeIndex.value = idx
+      localStorage.setItem('reader-themeIndex', String(idx))
+    }
+    persistReaderColorStyle(mode)
   }
 
   function toggleNight() {
@@ -460,8 +460,8 @@ export const useReaderStore = defineStore('reader', () => {
   async function resolveLatestShelfBook(localBook: Book) {
     if (!localBook.bookUrl) return localBook
     const latest = await getShelfBook(localBook.bookUrl).catch(() => null)
-    if (!latest) return localBook
-    const shelfBook = shelfStore.books.find((item) => item.bookUrl === localBook.bookUrl || item.bookUrl === latest.bookUrl)
+    if (!latest || latest.bookUrl !== localBook.bookUrl) return localBook
+    const shelfBook = shelfStore.books.find((item) => item.bookUrl === localBook.bookUrl)
     if (shelfBook) {
       Object.assign(shelfBook, latest)
     }
@@ -474,11 +474,105 @@ export const useReaderStore = defineStore('reader', () => {
       bookUrl: book.value.bookUrl,
       index,
       position: encodeServerProgress(progress),
+      revision: knownProgressRevisions.get(book.value.bookUrl)
+        ?? normalizeProgressRevision(book.value.progressRevision),
     }
   }
 
   function markProgressDirty() {
     progressDirty.value = true
+    progressChangeVersion += 1
+  }
+
+  function normalizeProgressRevision(value: unknown) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.trunc(value))
+      : 0
+  }
+
+  function rememberProgressRevision(bookUrl: string, revision: unknown) {
+    const candidate = normalizeProgressRevision(revision)
+    const known = knownProgressRevisions.get(bookUrl)
+    // A delayed keepalive response can arrive after a newer regular save. A
+    // revision learned from either response must therefore never move back.
+    const normalized = known == null ? candidate : Math.max(known, candidate)
+    knownProgressRevisions.set(bookUrl, normalized)
+    if (book.value?.bookUrl === bookUrl) {
+      book.value.progressRevision = normalized
+    }
+    const shelfBook = shelfStore.books.find((item) => item.bookUrl === bookUrl)
+    if (shelfBook) {
+      shelfBook.progressRevision = normalized
+    }
+  }
+
+  function progressPayloadKey(payload: Pick<ServerProgressPayload, 'bookUrl' | 'index' | 'position'>) {
+    return `${payload.bookUrl}::${payload.index}::${payload.position}`
+  }
+
+  function serverProgressMatchesPayload(result: SaveBookProgressResponse, payload: ServerProgressPayload) {
+    return result.currentProgress?.index === payload.index
+      && result.currentProgress.position === payload.position
+  }
+
+  function parseKeepaliveProgressResult(raw: unknown): SaveBookProgressResponse | string | null {
+    let value: unknown = raw
+    if (value && typeof value === 'object' && 'isSuccess' in value) {
+      const envelope = value as { isSuccess?: boolean; data?: unknown }
+      if (!envelope.isSuccess) return null
+      value = envelope.data
+    }
+    if (typeof value === 'string') return value
+    if (!value || typeof value !== 'object') return null
+    const result = value as Partial<SaveBookProgressResponse>
+    if (typeof result.accepted !== 'boolean'
+      || typeof result.currentRevision !== 'number'
+      || !Number.isFinite(result.currentRevision)
+      || !result.currentProgress
+      || typeof result.currentProgress !== 'object') {
+      return null
+    }
+    return result as SaveBookProgressResponse
+  }
+
+  function applyProgressSaveResult(
+    payload: ServerProgressPayload,
+    submittedChangeVersion: number,
+    result: SaveBookProgressResponse | string,
+    notifyConflict = true,
+  ) {
+    if (typeof result === 'string') {
+      if (book.value?.bookUrl !== payload.bookUrl) return
+      if (progressChangeVersion === submittedChangeVersion) {
+        progressDirty.value = false
+        lastServerProgressKey.value = progressPayloadKey(payload)
+      }
+      return
+    }
+
+    rememberProgressRevision(payload.bookUrl, result.currentRevision)
+    if (book.value?.bookUrl !== payload.bookUrl) return
+
+    // A keepalive and a normal save can race with the same revision. If one
+    // wins and the other is rejected, matching server progress means the
+    // intended position is already durable and is not a cross-device conflict.
+    if (result.accepted || serverProgressMatchesPayload(result, payload)) {
+      if (progressChangeVersion === submittedChangeVersion) {
+        progressDirty.value = false
+        lastServerProgressKey.value = progressPayloadKey(payload)
+      }
+      return
+    }
+
+    if (progressChangeVersion === submittedChangeVersion) {
+      progressDirty.value = false
+      lastServerProgressKey.value = progressPayloadKey(payload)
+    }
+    const conflictKey = `${payload.bookUrl}::${result.currentRevision}`
+    if (notifyConflict && lastProgressConflictKey !== conflictKey) {
+      lastProgressConflictKey = conflictKey
+      appStore.showToast('其他设备已保存更新进度，本次旧进度未覆盖', 'warning')
+    }
   }
 
   function syncLocalBookProgress(progress = chapterScrollProgress.value) {
@@ -520,12 +614,14 @@ export const useReaderStore = defineStore('reader', () => {
       restoredChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
         bookSourceUrl: latestBook.origin,
+        book: latestBook,
       }).catch(() => session.chapters)
       nextIndex = Math.max(0, Math.min(restoredChapters.length - 1, latestBook.durChapterIndex || 0))
       nextProgress = decodeServerProgress(latestBook.durChapterPos)
     }
 
     book.value = restoredBook
+    rememberProgressRevision(restoredBook.bookUrl, restoredBook.progressRevision)
     currentIndex.value = nextIndex
     chapters.value = restoredChapters
     loadReadChapterHistory(restoredBook)
@@ -624,19 +720,33 @@ export const useReaderStore = defineStore('reader', () => {
     if (speechConfig.openaiSource === 'server') return true
     return !!speechConfig.openaiBaseUrl.trim()
   })
-  const speechProviderLabel = computed(() => speechConfig.provider === 'openai' ? 'OpenAI Speech' : '系统语音')
+  const azureSpeechConfigured = computed(() => (
+    !!speechConfig.azureRegion.trim()
+    && !!speechConfig.azureApiKey.trim()
+    && !!speechConfig.azureVoice.trim()
+  ))
+  const remoteSpeechConfigured = computed(() => (
+    speechConfig.provider === 'azure' ? azureSpeechConfigured.value : openAISpeechConfigured.value
+  ))
+  const speechProviderLabel = computed(() => {
+    if (speechConfig.provider === 'openai') return 'OpenAI Speech'
+    if (speechConfig.provider === 'azure') return 'Microsoft Azure Speech'
+    return '系统语音'
+  })
   const speechStopAt = ref(0)
   let speechStopTimer: number | null = null
   let synth: SpeechSynthesis | null = typeof window !== 'undefined' ? window.speechSynthesis : null
   let currentUtterance: SpeechSynthesisUtterance | null = null
   let currentOpenAIAudio: HTMLAudioElement | null = null
+  const remoteSpeechAudioElements: HTMLAudioElement[] = []
   let currentOpenAIAudioUrl = ''
   let currentOpenAIAbortController: AbortController | null = null
-  const preloadedOpenAIAudio = ref<PreloadedOpenAIAudio[]>([])
+  let preloadedOpenAIAudio: PreloadedOpenAIAudio[] = []
   let preloadGeneration = 0
   const inFlightPreloadKeys = new Set<string>()
   const inFlightOpenAIAudioRequests = new Map<string, Promise<Blob>>()
   let currentTTSSessionId = 0
+  let mediaSessionConfigured = false
 
   function logTTS(message: string, payload?: unknown) {
     void message
@@ -670,6 +780,56 @@ export const useReaderStore = defineStore('reader', () => {
     localStorage.setItem('reader-speechConfig', JSON.stringify(speechConfig))
   }
 
+  function setMediaSessionPlaybackState(state: MediaSessionPlaybackState) {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+    try {
+      navigator.mediaSession.playbackState = state
+    } catch {
+      // Media Session is best-effort across mobile browsers.
+    }
+  }
+
+  function configureMediaSession(rawText = '') {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return
+    try {
+      if (!mediaSessionConfigured) {
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (currentOpenAIAudio?.paused) {
+            void currentOpenAIAudio.play()
+          } else if (synth?.paused) {
+            synth.resume()
+            isPaused.value = false
+            isSpeaking.value = true
+            setMediaSessionPlaybackState('playing')
+          }
+        })
+        navigator.mediaSession.setActionHandler('pause', () => {
+          if (currentOpenAIAudio && !currentOpenAIAudio.paused) {
+            currentOpenAIAudio.pause()
+          } else if (synth?.speaking && !synth.paused) {
+            synth.pause()
+            isPaused.value = true
+            setMediaSessionPlaybackState('paused')
+          }
+        })
+        navigator.mediaSession.setActionHandler('stop', () => stopTTS())
+        mediaSessionConfigured = true
+      }
+      if (typeof MediaMetadata !== 'undefined') {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: currentChapter.value?.title || book.value?.name || '听书',
+          artist: book.value?.author || 'Reader Next',
+          album: book.value?.name || 'Reader Next',
+        })
+      }
+      if (rawText) {
+        logTTS('media session updated', { text: rawText.slice(0, 40) })
+      }
+    } catch {
+      // Unsupported actions must not block speech playback.
+    }
+  }
+
   function fetchVoices() {
     if (!synth) return
     voiceList.value = synth.getVoices().slice().sort((a, b) => {
@@ -692,7 +852,13 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function setSpeechProvider(provider: SpeechProvider) {
+    if (speechConfig.provider === provider) return
+    stopTTS(false)
     speechConfig.provider = provider
+    if (provider === 'azure') {
+      speechConfig.speechRate = Math.min(speechConfig.speechRate, 2)
+      speechConfig.speechPitch = Math.min(speechConfig.speechPitch, 1.5)
+    }
     clearPreloadedOpenAIAudio()
     saveSpeechConfig()
   }
@@ -739,31 +905,87 @@ export const useReaderStore = defineStore('reader', () => {
     saveSpeechConfig()
   }
 
+  function setAzureSpeechRegion(region: string) {
+    speechConfig.azureRegion = region.trim()
+    clearPreloadedOpenAIAudio()
+    saveSpeechConfig()
+  }
+
+  function setAzureSpeechApiKey(apiKey: string) {
+    speechConfig.azureApiKey = apiKey.trim()
+    clearPreloadedOpenAIAudio()
+    saveSpeechConfig()
+  }
+
+  function setAzureSpeechVoice(voice: string) {
+    speechConfig.azureVoice = voice.trim()
+    clearPreloadedOpenAIAudio()
+    saveSpeechConfig()
+  }
+
+  function setAzureSpeechFormat(format: AzureSpeechFormat) {
+    speechConfig.azureFormat = format
+    clearPreloadedOpenAIAudio()
+    saveSpeechConfig()
+  }
+
   function setSpeechRate(rate: number) {
-    speechConfig.speechRate = rate
+    const max = speechConfig.provider === 'azure' ? 2 : 3
+    speechConfig.speechRate = Math.max(0.5, Math.min(max, rate))
     clearPreloadedOpenAIAudio()
     saveSpeechConfig()
   }
 
   function setSpeechPitch(pitch: number) {
-    speechConfig.speechPitch = pitch
+    const max = speechConfig.provider === 'azure' ? 1.5 : 2
+    speechConfig.speechPitch = Math.max(0.5, Math.min(max, pitch))
+    clearPreloadedOpenAIAudio()
+    saveSpeechConfig()
+  }
+
+  function setSpeechVolume(volume: number) {
+    speechConfig.speechVolume = Math.max(0, Math.min(1, volume))
+    if (currentUtterance) {
+      currentUtterance.volume = speechConfig.speechVolume
+    }
+    remoteSpeechAudioElements.forEach((audio) => {
+      audio.volume = speechConfig.speechVolume
+    })
     saveSpeechConfig()
   }
 
   function buildOpenAIAudioCacheKey(rawText: string) {
     return [
+      speechConfig.provider,
       speechConfig.openaiSource,
       speechConfig.openaiBaseUrl.trim(),
       speechConfig.openaiApiKey.trim(),
       speechConfig.openaiModel,
       speechConfig.openaiVoice,
       speechConfig.openaiFormat,
+      speechConfig.azureRegion.trim(),
+      speechConfig.azureApiKey.trim(),
+      speechConfig.azureVoice,
+      speechConfig.azureFormat,
       speechConfig.speechRate.toFixed(1),
+      speechConfig.speechPitch.toFixed(1),
       rawText,
     ].join('::')
   }
 
   async function fetchOpenAIAudioBlob(rawText: string, signal?: AbortSignal) {
+    if (speechConfig.provider === 'azure') {
+      return requestAzureSpeechAudio({
+        region: speechConfig.azureRegion,
+        subscriptionKey: speechConfig.azureApiKey,
+        input: rawText.slice(0, 4096),
+        voice: speechConfig.azureVoice,
+        outputFormat: speechConfig.azureFormat,
+        rate: speechConfig.speechRate,
+        pitch: speechConfig.speechPitch,
+        signal,
+      })
+    }
     return requestOpenAISpeechAudio({
       source: speechConfig.openaiSource,
       baseUrl: speechConfig.openaiBaseUrl,
@@ -793,21 +1015,76 @@ export const useReaderStore = defineStore('reader', () => {
     return { key, promise }
   }
 
+  function resetRemoteSpeechAudio(audio: HTMLAudioElement) {
+    audio.onplay = null
+    audio.onpause = null
+    audio.onended = null
+    audio.onerror = null
+    audio.pause()
+    audio.removeAttribute('src')
+    try {
+      audio.load()
+    } catch {
+      // Some test and embedded browsers do not implement load().
+    }
+  }
+
+  function acquireRemoteSpeechAudioBuffer() {
+    const reserved = new Set(preloadedOpenAIAudio.map((entry) => entry.audio).filter(Boolean))
+    const available = remoteSpeechAudioElements.find((audio) => audio !== currentOpenAIAudio && !reserved.has(audio))
+    if (available) return available
+    if (remoteSpeechAudioElements.length >= REMOTE_SPEECH_AUDIO_BUFFER_COUNT) return null
+    const audio = new Audio()
+    audio.preload = 'auto'
+    audio.volume = speechConfig.speechVolume
+    remoteSpeechAudioElements.push(audio)
+    return audio
+  }
+
+  function prepareRemoteSpeechAudioBuffer() {
+    const entry = preloadedOpenAIAudio.find((item) => !item.audio)
+    if (!entry) return
+    const audio = acquireRemoteSpeechAudioBuffer()
+    if (!audio) return
+    const url = URL.createObjectURL(entry.blob)
+    resetRemoteSpeechAudio(audio)
+    audio.preload = 'auto'
+    audio.volume = speechConfig.speechVolume
+    audio.src = url
+    entry.audio = audio
+    entry.url = url
+    try {
+      audio.load()
+    } catch {
+      // Assigning a Blob URL is enough when explicit preload is unavailable.
+    }
+  }
+
+  function releasePreloadedOpenAIAudio(entries: PreloadedOpenAIAudio[]) {
+    entries.forEach((entry) => {
+      if (entry.url) URL.revokeObjectURL(entry.url)
+      if (entry.audio && entry.audio !== currentOpenAIAudio) {
+        resetRemoteSpeechAudio(entry.audio)
+      }
+    })
+  }
+
   function clearPreloadedOpenAIAudio() {
     preloadGeneration += 1
     inFlightPreloadKeys.clear()
     inFlightOpenAIAudioRequests.clear()
-    preloadedOpenAIAudio.value = []
+    releasePreloadedOpenAIAudio(preloadedOpenAIAudio)
+    preloadedOpenAIAudio = []
   }
 
   async function preloadOpenAITTS(rawText?: string | string[] | null) {
-    if (speechConfig.provider !== 'openai' || !openAISpeechConfigured.value) return
+    if (speechConfig.provider === 'system' || !remoteSpeechConfigured.value) return
     const texts = Array.isArray(rawText) ? rawText : [rawText || '']
-    const normalizedTexts = texts.map((item) => item.trim()).filter(Boolean)
+    const normalizedTexts = Array.from(new Set(texts.map((item) => item.trim()).filter(Boolean)))
     if (!normalizedTexts.length) return
     const pendingTexts = normalizedTexts.filter((item) => {
       const key = buildOpenAIAudioCacheKey(item)
-      return !preloadedOpenAIAudio.value.some((entry) => entry.key === key) && !inFlightPreloadKeys.has(key)
+      return !preloadedOpenAIAudio.some((entry) => entry.key === key) && !inFlightPreloadKeys.has(key)
     })
     if (!pendingTexts.length) return
 
@@ -819,13 +1096,21 @@ export const useReaderStore = defineStore('reader', () => {
       void promise
         .then((blob) => {
           if (generation !== preloadGeneration) return
-          const nextQueue = preloadedOpenAIAudio.value.filter((entry) => entry.key !== key)
+          const replaced = preloadedOpenAIAudio.filter((entry) => entry.key === key)
+          releasePreloadedOpenAIAudio(replaced)
+          const nextQueue = preloadedOpenAIAudio.filter((entry) => entry.key !== key)
           nextQueue.push({ key, blob })
-          preloadedOpenAIAudio.value = nextQueue
+          if (nextQueue.length > OPENAI_AUDIO_PRELOAD_LIMIT) {
+            releasePreloadedOpenAIAudio(nextQueue.splice(0, nextQueue.length - OPENAI_AUDIO_PRELOAD_LIMIT))
+          }
+          preloadedOpenAIAudio = nextQueue
+          prepareRemoteSpeechAudioBuffer()
         })
         .catch(() => undefined)
         .finally(() => {
-          inFlightPreloadKeys.delete(key)
+          if (generation === preloadGeneration) {
+            inFlightPreloadKeys.delete(key)
+          }
         })
     }
   }
@@ -835,19 +1120,18 @@ export const useReaderStore = defineStore('reader', () => {
       currentOpenAIAbortController.abort()
       currentOpenAIAbortController = null
     }
-    if (currentOpenAIAudio) {
-      currentOpenAIAudio.onplay = null
-      currentOpenAIAudio.onpause = null
-      currentOpenAIAudio.onended = null
-      currentOpenAIAudio.onerror = null
-      currentOpenAIAudio.pause()
-      currentOpenAIAudio.src = ''
-      currentOpenAIAudio = null
-    }
+    remoteSpeechAudioElements.forEach(resetRemoteSpeechAudio)
+    currentOpenAIAudio = null
     if (currentOpenAIAudioUrl) {
       URL.revokeObjectURL(currentOpenAIAudioUrl)
       currentOpenAIAudioUrl = ''
     }
+    releasePreloadedOpenAIAudio(preloadedOpenAIAudio)
+    preloadedOpenAIAudio.forEach((entry) => {
+      entry.audio = undefined
+      entry.url = undefined
+    })
+    prepareRemoteSpeechAudioBuffer()
   }
 
   function clearSpeechStopTimer(resetConfig = true) {
@@ -864,7 +1148,9 @@ export const useReaderStore = defineStore('reader', () => {
 
   function setSpeechStopTimer(minutes: number) {
     clearSpeechStopTimer(false)
-    const normalized = Math.max(0, Math.min(180, Math.round(minutes)))
+    const normalized = Number.isFinite(minutes)
+      ? Math.max(0, Math.min(1440, Math.round(minutes)))
+      : 0
     speechConfig.stopAfterMinutes = normalized
     saveSpeechConfig()
     if (!normalized) {
@@ -897,6 +1183,7 @@ export const useReaderStore = defineStore('reader', () => {
     utterance.voice = selectedVoice || null
     utterance.rate = speechConfig.speechRate
     utterance.pitch = speechConfig.speechPitch
+    utterance.volume = speechConfig.speechVolume
     logTTS('system speak queued', {
       sessionId,
       voice: utterance.voice?.name || utterance.lang,
@@ -949,6 +1236,7 @@ export const useReaderStore = defineStore('reader', () => {
         return
       }
       if (kind === 'error') {
+        setMediaSessionPlaybackState('none')
         options.onError?.(event)
       }
     }
@@ -1034,6 +1322,7 @@ export const useReaderStore = defineStore('reader', () => {
       if (!isCurrentTTSSession(sessionId) || currentUtterance !== utterance) return
       isSpeaking.value = true
       isPaused.value = false
+      setMediaSessionPlaybackState('playing')
       sawStart = true
       systemTtsNativeEventsReliable.value = true
       lastProgressAt = Date.now()
@@ -1066,13 +1355,15 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function startOpenAITTS(rawText: string, options: TTSOptions, sessionId: number) {
-    if (!openAISpeechConfigured.value) {
-      const error = new Error('请先配置 OpenAI Speech')
+    if (!remoteSpeechConfigured.value) {
+      const error = new Error(speechConfig.provider === 'azure'
+        ? '请先配置 Azure 区域、密钥和音色'
+        : '请先配置 OpenAI Speech')
       appStore.showToast(error.message, 'warning')
       options.onError?.(error)
       return
     }
-    if (speechConfig.openaiSource === 'server') {
+    if (speechConfig.provider === 'openai' && speechConfig.openaiSource === 'server') {
       const serverConfig = await aiBookStore.loadServerModelConfig()
       if (!serverConfig?.canUseServerModel) {
         const error = new Error('当前账号没有使用后端模型配置的权限')
@@ -1092,23 +1383,74 @@ export const useReaderStore = defineStore('reader', () => {
     isSpeechLoading.value = true
     logTTS('openai speak queued', {
       sessionId,
+      provider: speechConfig.provider,
       model: speechConfig.openaiModel,
-      voice: speechConfig.openaiVoice,
+      voice: speechConfig.provider === 'azure' ? speechConfig.azureVoice : speechConfig.openaiVoice,
       text: rawText.slice(0, 80),
     })
-    const playBlob = (blob: Blob, controller: AbortController) => {
-      if (controller.signal.aborted) return
-      if (!isCurrentTTSSession(sessionId)) return
+    const playBlob = (
+      blob: Blob,
+      controller: AbortController,
+      bufferedEntry?: PreloadedOpenAIAudio,
+    ) => {
+      const releaseUnusedBufferedEntry = () => {
+        if (!bufferedEntry) return
+        releasePreloadedOpenAIAudio([bufferedEntry])
+        bufferedEntry.audio = undefined
+        bufferedEntry.url = undefined
+      }
+      if (controller.signal.aborted || !isCurrentTTSSession(sessionId)) {
+        releaseUnusedBufferedEntry()
+        return
+      }
       isSpeechLoading.value = false
-      currentOpenAIAudioUrl = URL.createObjectURL(blob)
-      const audio = new Audio(currentOpenAIAudioUrl)
+      let audio = bufferedEntry?.audio || acquireRemoteSpeechAudioBuffer()
+      if (!audio) {
+        const releasable = preloadedOpenAIAudio.find((entry) => entry.audio && entry.audio !== currentOpenAIAudio)
+        if (releasable) {
+          releasePreloadedOpenAIAudio([releasable])
+          releasable.audio = undefined
+          releasable.url = undefined
+          audio = acquireRemoteSpeechAudioBuffer()
+        }
+      }
+      if (!audio) {
+        currentOpenAIAbortController = null
+        isSpeaking.value = false
+        isPaused.value = false
+        options.onError?.(new Error(`${speechProviderLabel.value} 音频缓冲区不可用`))
+        return
+      }
+      const audioUrl = bufferedEntry?.url || URL.createObjectURL(blob)
+      if (!bufferedEntry?.audio) {
+        resetRemoteSpeechAudio(audio)
+        audio.src = audioUrl
+      }
+      if (bufferedEntry) {
+        bufferedEntry.audio = undefined
+        bufferedEntry.url = undefined
+      }
+      currentOpenAIAudioUrl = audioUrl
+      audio.volume = speechConfig.speechVolume
       currentOpenAIAudio = audio
       currentOpenAIAbortController = null
+
+      let audioReleased = false
+      const releaseAudio = () => {
+        if (audioReleased) return
+        audioReleased = true
+        if (currentOpenAIAudio === audio) currentOpenAIAudio = null
+        if (currentOpenAIAudioUrl === audioUrl) currentOpenAIAudioUrl = ''
+        URL.revokeObjectURL(audioUrl)
+        resetRemoteSpeechAudio(audio)
+        prepareRemoteSpeechAudioBuffer()
+      }
 
       audio.onplay = () => {
         if (!isCurrentTTSSession(sessionId) || currentOpenAIAudio !== audio) return
         isSpeaking.value = true
         isPaused.value = false
+        setMediaSessionPlaybackState('playing')
         logTTS('openai onplay', { sessionId, text: rawText.slice(0, 40) })
         options.onStart?.()
       }
@@ -1118,32 +1460,26 @@ export const useReaderStore = defineStore('reader', () => {
         if (!audio.ended) {
           isPaused.value = true
           isSpeaking.value = false
+          setMediaSessionPlaybackState('paused')
         }
       }
 
       audio.onended = () => {
-        if (currentOpenAIAudio === audio) {
-          currentOpenAIAudio = null
-        }
+        releaseAudio()
         if (!isCurrentTTSSession(sessionId)) return
         isSpeaking.value = false
         isPaused.value = false
         logTTS('openai onended', { sessionId, text: rawText.slice(0, 40) })
-        if (currentOpenAIAudioUrl) {
-          URL.revokeObjectURL(currentOpenAIAudioUrl)
-          currentOpenAIAudioUrl = ''
-        }
         options.onEnd?.()
       }
 
       audio.onerror = () => {
-        if (currentOpenAIAudio === audio) {
-          currentOpenAIAudio = null
-        }
+        releaseAudio()
         if (!isCurrentTTSSession(sessionId)) return
         isSpeaking.value = false
         isPaused.value = false
-        const error = new Error('OpenAI Speech 音频播放失败')
+        const error = new Error(`${speechProviderLabel.value} 音频播放失败`)
+        setMediaSessionPlaybackState('none')
         logTTS('openai onerror', { sessionId, text: rawText.slice(0, 40) })
         options.onError?.(error)
       }
@@ -1153,7 +1489,7 @@ export const useReaderStore = defineStore('reader', () => {
         isSpeechLoading.value = false
         isSpeaking.value = false
         isPaused.value = false
-        currentOpenAIAudio = null
+        releaseAudio()
         logTTS('openai play catch', { sessionId, message: error.message, text: rawText.slice(0, 40) })
         options.onError?.(error)
       })
@@ -1163,16 +1499,24 @@ export const useReaderStore = defineStore('reader', () => {
     currentOpenAIAbortController = controller
 
     const key = buildOpenAIAudioCacheKey(rawText)
-    const cached = preloadedOpenAIAudio.value.find((entry) => entry.key === key)
+    const takeBufferedAudio = () => {
+      const bufferedIndex = preloadedOpenAIAudio.findIndex((entry) => entry.key === key)
+      return bufferedIndex >= 0 ? preloadedOpenAIAudio.splice(bufferedIndex, 1)[0] : undefined
+    }
+    const cached = takeBufferedAudio()
     if (cached) {
-      void Promise.resolve(playBlob(cached.blob, controller))
+      void Promise.resolve(playBlob(cached.blob, controller, cached))
+      prepareRemoteSpeechAudioBuffer()
       return
     }
 
     const inFlight = inFlightOpenAIAudioRequests.get(key)
     if (inFlight) {
       void inFlight.then((blob) => {
-        return playBlob(blob, controller)
+        const buffered = takeBufferedAudio()
+        const playback = playBlob(blob, controller, buffered)
+        prepareRemoteSpeechAudioBuffer()
+        return playback
       }).catch((error: Error) => {
         if (controller.signal.aborted || !isCurrentTTSSession(sessionId)) return
         isSpeechLoading.value = false
@@ -1197,7 +1541,7 @@ export const useReaderStore = defineStore('reader', () => {
       currentOpenAIAbortController = null
       currentOpenAIAudio = null
       logTTS('openai request catch', { sessionId, message: error.message, text: rawText.slice(0, 40) })
-      appStore.showToast(error.message || 'OpenAI Speech 请求失败', 'error')
+      appStore.showToast(error.message || `${speechProviderLabel.value} 请求失败`, 'error')
       options.onError?.(error)
     })
   }
@@ -1213,6 +1557,7 @@ export const useReaderStore = defineStore('reader', () => {
     const rawText = (text || content.value.replace(/<[^>]+>/g, '')).trim()
     if (!rawText) return
 
+    configureMediaSession(rawText)
     const sessionId = beginTTSSession()
     logTTS('startTTS', {
       sessionId,
@@ -1237,7 +1582,7 @@ export const useReaderStore = defineStore('reader', () => {
       }
     }
 
-    if (speechConfig.provider === 'openai') {
+    if (speechConfig.provider !== 'system') {
       void startOpenAITTS(rawText, options, sessionId)
       return
     }
@@ -1246,16 +1591,18 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function pauseTTS() {
-    if (speechConfig.provider === 'openai') {
+    if (speechConfig.provider !== 'system') {
       if (!currentOpenAIAudio) return
       if (currentOpenAIAudio.paused) {
         void currentOpenAIAudio.play()
         isPaused.value = false
         isSpeaking.value = true
+        setMediaSessionPlaybackState('playing')
       } else {
         currentOpenAIAudio.pause()
         isPaused.value = true
         isSpeaking.value = false
+        setMediaSessionPlaybackState('paused')
       }
       return
     }
@@ -1264,9 +1611,11 @@ export const useReaderStore = defineStore('reader', () => {
     if (synth.speaking && !synth.paused) {
       synth.pause()
       isPaused.value = true
+      setMediaSessionPlaybackState('paused')
     } else if (synth.paused) {
       synth.resume()
       isPaused.value = false
+      setMediaSessionPlaybackState('playing')
     }
   }
 
@@ -1286,6 +1635,7 @@ export const useReaderStore = defineStore('reader', () => {
     isSpeechLoading.value = false
     isSpeaking.value = false
     isPaused.value = false
+    setMediaSessionPlaybackState('none')
     if (resetCallbacks) {
       clearSpeechStopTimer()
     }
@@ -1294,8 +1644,19 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Book / chapter ops ─── */
   async function loadBook(b: Book) {
     loading.value = true
-    const latestBook = await resolveLatestShelfBook(b)
+    let latestBook = await resolveLatestShelfBook(b)
+    if (!isLocalTxtBook(latestBook)) {
+      const bookInfo = await getBookInfo(
+        latestBook.bookUrl,
+        latestBook.origin,
+        latestBook,
+      ).catch(() => null)
+      if (bookInfo) {
+        latestBook = { ...latestBook, ...bookInfo }
+      }
+    }
     book.value = latestBook
+    rememberProgressRevision(latestBook.bookUrl, latestBook.progressRevision)
     chapters.value = []
     content.value = ''
     appStore.markBookOpened(latestBook.bookUrl)
@@ -1309,7 +1670,9 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       chapters.value = await getChapterList({
         bookUrl: latestBook.bookUrl,
+        ...(latestBook.tocUrl ? { tocUrl: latestBook.tocUrl } : {}),
         bookSourceUrl: latestBook.origin,
+        book: latestBook,
       })
       if (chapters.value.length) {
         currentIndex.value = Math.max(0, Math.min(currentIndex.value, chapters.value.length - 1))
@@ -1348,18 +1711,27 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function persistProgress(index = currentIndex.value, progress = chapterScrollProgress.value) {
-    const payload = currentServerProgressPayload(index, progress)
-    if (!payload) return
-    await saveBookProgress(payload).then(() => {
-      progressDirty.value = false
-      lastServerProgressKey.value = `${payload.bookUrl}::${payload.index}::${payload.position}`
-    }).catch(() => undefined)
+    const snapshot = currentServerProgressPayload(index, progress)
+    if (!snapshot) return
+    const submittedChangeVersion = progressChangeVersion
+    const save = async () => {
+      const payload: ServerProgressPayload = {
+        ...snapshot,
+        revision: knownProgressRevisions.get(snapshot.bookUrl) ?? snapshot.revision,
+      }
+      const result = await saveBookProgress(payload).catch(() => null)
+      if (result == null) return
+      applyProgressSaveResult(payload, submittedChangeVersion, result)
+    }
+    const pending = progressSaveQueue.then(save, save)
+    progressSaveQueue = pending.catch(() => undefined)
+    await pending
   }
 
   async function flushProgressToServer(force = false) {
     const payload = currentServerProgressPayload()
     if (!payload) return
-    const nextKey = `${payload.bookUrl}::${payload.index}::${payload.position}`
+    const nextKey = progressPayloadKey(payload)
     if (!force && !progressDirty.value && lastServerProgressKey.value === nextKey) return
     await persistProgress(payload.index, chapterScrollProgress.value)
   }
@@ -1367,25 +1739,34 @@ export const useReaderStore = defineStore('reader', () => {
   function flushProgressToServerKeepalive(force = false) {
     const payload = currentServerProgressPayload()
     if (!payload || typeof fetch === 'undefined') return
-    const nextKey = `${payload.bookUrl}::${payload.index}::${payload.position}`
+    const nextKey = progressPayloadKey(payload)
     if (!force && !progressDirty.value && lastServerProgressKey.value === nextKey) return
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
-    const token = localStorage.getItem('accessToken')
+    const token = localStorage.getItem('accessToken')?.trim()
     if (token) {
       headers.Authorization = token
     }
+    const secureKey = localStorage.getItem('secureKey')?.trim()
+    if (secureKey) {
+      headers['X-Secure-Key'] = secureKey
+    }
 
+    const submittedChangeVersion = progressChangeVersion
     void fetch('/reader3/saveBookProgress', {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
       keepalive: true,
+    }).then(async (response) => {
+      if (!response.ok) return
+      const raw = await response.json().catch(() => null)
+      const result = parseKeepaliveProgressResult(raw)
+      if (result == null) return
+      applyProgressSaveResult(payload, submittedChangeVersion, result, false)
     }).catch(() => undefined)
-    progressDirty.value = false
-    lastServerProgressKey.value = nextKey
   }
 
   async function fetchChapterContent(index: number, forceRefresh = false) {
@@ -1418,7 +1799,11 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       chapterContent = await getBookContent({
         chapterUrl: chapter.url,
+        bookUrl: book.value.bookUrl,
         bookSourceUrl: book.value.origin,
+        book: book.value,
+        chapter,
+        nextChapterUrl: chapters.value[index + 1]?.url,
         refresh: forceRefresh ? 1 : 0,
       })
     } catch (error) {
@@ -1571,7 +1956,9 @@ export const useReaderStore = defineStore('reader', () => {
       preloadedContent.value.clear()
       chapters.value = await getChapterList({
         bookUrl: book.value.bookUrl,
+        ...(book.value.tocUrl ? { tocUrl: book.value.tocUrl } : {}),
         bookSourceUrl: book.value.origin,
+        book: book.value,
         refresh: 1,
       })
       const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
@@ -1712,7 +2099,10 @@ export const useReaderStore = defineStore('reader', () => {
       getPersistedReaderSession, restorePersistedSession,
       persistProgress, flushProgressToServer, flushProgressToServerKeepalive,
       config, updateConfig, resetConfig, saveConfig,
-    themeIndex, isNight, currentTheme, setThemeIndex, toggleNight,
+    themeIndex, themeMode, isNight, currentTheme, dayColorStyle, nightColorStyle,
+    setThemeIndex, setThemeMode, updateReaderColor, applyThemePreset, toggleNight,
+    readerBackgroundConfig, readerBackgroundUrl, readerBackgroundLoaded, readerBackgroundSyncState,
+    setReaderBackgroundImage, clearReaderBackgroundImage, updateReaderBackgroundConfig,
     autoReading, autoReadingTimer, toggleAutoReading, stopAutoReading,
     activePanel, openPanel, togglePanel, backPanel, closePanel,
     bookmarks, fetchBookmarks, addBookmark, removeBookmark, removeBookmarks,
@@ -1721,10 +2111,11 @@ export const useReaderStore = defineStore('reader', () => {
     switchSource, preloadNextChapter, preloadAroundChapter,
     refreshChapters,
     isSpeaking, isSpeechLoading, isPaused, startTTS, pauseTTS, stopTTS,
-    voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured,
+    voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured, azureSpeechConfigured,
     systemTtsNativeEventsReliable,
-    fetchVoices, setVoiceName, setSpeechProvider, setSpeechRate, setSpeechPitch, setSpeechStopTimer, clearSpeechStopTimer,
+    fetchVoices, setVoiceName, setSpeechProvider, setSpeechRate, setSpeechPitch, setSpeechVolume, setSpeechStopTimer, clearSpeechStopTimer,
     setOpenAISpeechSource, setOpenAISpeechBaseUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode, preloadOpenAITTS,
+    setAzureSpeechRegion, setAzureSpeechApiKey, setAzureSpeechVoice, setAzureSpeechFormat,
     displayContent, processContentForDisplay,
     isAutoScrolling,
   }

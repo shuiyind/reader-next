@@ -18,15 +18,15 @@
               <img
                 v-if="coverSrc"
                 :src="coverSrc"
-                :alt="book.name"
+                :alt="displayName"
                 @error="coverFailed = true"
               />
               <div v-else class="cover-placeholder-lg">
-                <span>{{ book.name }}</span>
+                <span>{{ displayName }}</span>
               </div>
             </div>
             <div class="book-header-info">
-              <h2>{{ book.name }}</h2>
+              <h2>{{ displayName }}</h2>
               <p class="author">{{ book.author || '未知作者' }}</p>
               <div class="book-tags">
                 <span v-if="book.kind" class="tag">{{ book.kind }}</span>
@@ -36,6 +36,46 @@
               <p v-if="(book as Book).durChapterTitle" class="progress">
                 已读至：{{ (book as Book).durChapterTitle }}
               </p>
+            </div>
+          </div>
+
+          <div v-if="canEditCover" class="local-book-tools">
+            <div class="local-tool-row">
+              <strong>{{ isLocal ? '本地书籍' : '封面管理' }}</strong>
+              <button v-if="isLocal" type="button" class="tool-btn" @click="editingName = !editingName">
+                重命名
+              </button>
+              <button type="button" class="tool-btn" :disabled="coverSearching" @click="searchCovers">
+                {{ coverSearching ? '搜索中…' : '搜索封面' }}
+              </button>
+              <button type="button" class="tool-btn" @click="coverFileInput?.click()">
+                上传封面
+              </button>
+              <input
+                ref="coverFileInput"
+                class="file-input"
+                type="file"
+                accept="image/*"
+                @change="uploadCover"
+              />
+            </div>
+            <form v-if="isLocal && editingName" class="rename-form" @submit.prevent="renameLocalBook">
+              <input v-model="nameDraft" maxlength="120" aria-label="书名" />
+              <button type="submit" class="tool-btn primary" :disabled="savingLocalBook">保存</button>
+              <button type="button" class="tool-btn" @click="editingName = false">取消</button>
+            </form>
+            <div v-if="coverCandidates.length" class="cover-candidates">
+              <button
+                v-for="candidate in coverCandidates"
+                :key="candidate.coverUrl"
+                type="button"
+                class="cover-candidate"
+                :title="`${candidate.name} · ${candidate.author || '未知作者'} · ${candidate.originName || candidate.origin}`"
+                @click="selectCover(candidate.coverUrl)"
+              >
+                <img :src="getCoverUrl(candidate.coverUrl)" :alt="candidate.name" />
+                <span class="cover-source">{{ candidate.originName || candidate.origin }}</span>
+              </button>
             </div>
           </div>
 
@@ -103,9 +143,12 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { getCoverUrl, getChapterList } from '../api/bookshelf'
+import { getCoverUrl, getChapterList, saveBook } from '../api/bookshelf'
+import { searchBookMulti } from '../api/search'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
+import { useAppStore } from '../stores/app'
+import { isLocalBook } from '../utils/localBook'
 import type { Book, SearchBook, BookChapter } from '../types'
 
 const props = defineProps<{
@@ -120,15 +163,36 @@ const emit = defineEmits<{
 const router = useRouter()
 const readerStore = useReaderStore()
 const shelfStore = useBookshelfStore()
+const appStore = useAppStore()
 
 const coverFailed = ref(false)
 const chapters = ref<BookChapter[]>([])
 const chaptersLoading = ref(false)
 const showAllChapters = ref(false)
+const editingName = ref(false)
+const nameDraft = ref('')
+const savedName = ref('')
+const savedCover = ref('')
+const savingLocalBook = ref(false)
+const coverSearching = ref(false)
+const coverFileInput = ref<HTMLInputElement | null>(null)
+const coverCandidates = ref<Array<Pick<SearchBook, 'name' | 'author' | 'coverUrl' | 'origin' | 'originName'> & { coverUrl: string }>>([])
+
+const isLocal = computed(() => isLocalBook(props.book))
+const shelfBook = computed(() => {
+  if (!props.book) return null
+  return shelfStore.books.find((book) => (
+    book.bookUrl === props.book?.bookUrl
+    && (!props.book.origin || book.origin === props.book.origin)
+  )) || null
+})
+const editableBook = computed<Book | null>(() => shelfBook.value || (isLocal.value ? props.book as Book : null))
+const canEditCover = computed(() => !!editableBook.value)
+const displayName = computed(() => savedName.value || props.book?.name || '')
 
 const coverSrc = computed(() => {
   if (coverFailed.value || !props.book) return ''
-  const url = (props.book as Book).customCoverUrl || props.book.coverUrl
+  const url = savedCover.value || (props.book as Book).customCoverUrl || props.book.coverUrl
   return url ? getCoverUrl(url) : ''
 })
 
@@ -140,6 +204,12 @@ const displayChapters = computed(() => {
 watch(() => props.modelValue, async (visible) => {
   if (visible && props.book) {
     coverFailed.value = false
+    const currentBook = editableBook.value || props.book as Book
+    savedName.value = currentBook.name
+    savedCover.value = currentBook.customCoverUrl || ''
+    nameDraft.value = currentBook.name
+    editingName.value = false
+    coverCandidates.value = []
     showAllChapters.value = false
     chapters.value = []
     chaptersLoading.value = true
@@ -148,6 +218,7 @@ watch(() => props.modelValue, async (visible) => {
       chapters.value = await getChapterList({
         bookUrl: b.bookUrl,
         bookSourceUrl: b.origin,
+        book: b,
       })
     } catch {
       chapters.value = []
@@ -159,6 +230,103 @@ watch(() => props.modelValue, async (visible) => {
 
 function close() {
   emit('update:modelValue', false)
+}
+
+async function saveBookChanges(changes: Partial<Book>) {
+  const currentBook = editableBook.value
+  if (!currentBook) return
+  savingLocalBook.value = true
+  try {
+    const saved = await saveBook({
+      ...currentBook,
+      name: savedName.value || currentBook.name,
+      customCoverUrl: savedCover.value || currentBook.customCoverUrl,
+      ...changes,
+    })
+    savedName.value = saved.name
+    savedCover.value = saved.customCoverUrl || ''
+    nameDraft.value = saved.name
+    coverFailed.value = false
+    await shelfStore.fetchBooks().catch(() => undefined)
+    appStore.showToast(isLocal.value ? '本地书籍信息已保存' : '书籍封面已保存', 'success')
+  } catch (error) {
+    appStore.showToast((error as Error).message || '保存失败', 'error')
+    throw error
+  } finally {
+    savingLocalBook.value = false
+  }
+}
+
+async function renameLocalBook() {
+  const name = nameDraft.value.trim()
+  if (!name) {
+    appStore.showToast('书名不能为空', 'warning')
+    return
+  }
+  await saveBookChanges({ name }).catch(() => undefined)
+  editingName.value = false
+}
+
+async function searchCovers() {
+  const key = displayName.value.trim()
+  if (!key) return
+  coverSearching.value = true
+  coverCandidates.value = []
+  try {
+    const books = await searchBookMulti({ key, page: 1 })
+    const seen = new Set<string>()
+    coverCandidates.value = books
+      .filter((book): book is SearchBook & { coverUrl: string } => {
+        const coverUrl = book.coverUrl?.trim()
+        if (!isLocal.value && book.origin === editableBook.value?.origin) return false
+        if (!coverUrl || seen.has(coverUrl)) return false
+        seen.add(coverUrl)
+        return true
+      })
+      .slice(0, 24)
+    if (!coverCandidates.value.length) {
+      appStore.showToast('暂未搜索到可用封面', 'warning')
+    }
+  } catch (error) {
+    appStore.showToast((error as Error).message || '搜索封面失败', 'error')
+  } finally {
+    coverSearching.value = false
+  }
+}
+
+async function selectCover(coverUrl: string) {
+  await saveBookChanges({ customCoverUrl: coverUrl }).catch(() => undefined)
+  coverCandidates.value = []
+}
+
+async function uploadCover(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    appStore.showToast('请选择图片文件', 'warning')
+    return
+  }
+  if (file.size > 3 * 1024 * 1024) {
+    appStore.showToast('封面图片不能超过 3MB', 'warning')
+    return
+  }
+  const dataUrl = await readFileAsDataUrl(file).catch(() => '')
+  if (!dataUrl) {
+    appStore.showToast('读取封面文件失败', 'error')
+    return
+  }
+  await saveBookChanges({ customCoverUrl: dataUrl }).catch(() => undefined)
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
 }
 
 async function startReading() {
@@ -332,6 +500,112 @@ function openAiBook() {
 .progress {
   font-size: var(--text-sm);
   color: var(--color-primary);
+}
+
+.local-book-tools {
+  margin-bottom: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-sunken);
+}
+
+.local-tool-row,
+.rename-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.local-tool-row strong {
+  margin-right: auto;
+  font-size: var(--text-sm);
+}
+
+.tool-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.tool-btn:hover:not(:disabled) {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.tool-btn.primary {
+  color: white;
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.tool-btn:disabled {
+  opacity: 0.55;
+}
+
+.file-input {
+  display: none;
+}
+
+.rename-form {
+  margin-top: var(--space-3);
+}
+
+.rename-form input {
+  flex: 1;
+  min-width: 160px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.cover-candidates {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: var(--space-3);
+}
+
+.cover-candidate {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+}
+
+.cover-candidate:hover {
+  border-color: var(--color-primary);
+}
+
+.cover-candidate img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cover-source {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 4px 5px;
+  color: white;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .book-intro {

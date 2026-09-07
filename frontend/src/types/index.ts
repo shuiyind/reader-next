@@ -21,6 +21,7 @@ export interface Book {
   durChapterPos?: number
   durChapterTime?: number
   durChapterTitle?: string
+  progressRevision?: number
   intro?: string
   latestChapterTitle?: string
   lastCheckTime?: number
@@ -32,6 +33,7 @@ export interface Book {
   tocHtml?: string
   kind?: string
   updateTime?: string
+  variable?: string
   cachedChapterCount?: number
   browserCachedChapterCount?: number
   recentKind?: 'book' | 'rss'
@@ -49,11 +51,13 @@ export interface SearchBook {
   originName?: string
   originGroup?: string
   coverUrl?: string
+  tocUrl?: string
   intro?: string
   kind?: string
   lastChapter?: string
   updateTime?: string
   wordCount?: string
+  variable?: string
   bookSourceUrls?: string[]
 }
 
@@ -62,6 +66,9 @@ export interface BookChapter {
   title: string
   url: string
   index: number
+  baseUrl?: string
+  bookUrl?: string
+  variable?: string
 }
 
 // ─── 书源 ───

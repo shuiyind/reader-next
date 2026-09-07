@@ -15,6 +15,12 @@ interface AutoPlaybackConfig {
   lineHeight: number
 }
 
+interface HorizontalPlayback {
+  isEnabled: ComputedRef<boolean>
+  getPageIndex: () => number
+  showPage: (pageIndex: number) => void
+}
+
 export function useReaderAutoPlayback(
   store: ReaderStore,
   config: ComputedRef<AutoPlaybackConfig>,
@@ -23,6 +29,7 @@ export function useReaderAutoPlayback(
   chapterTextRef: Ref<HTMLElement | undefined>,
   nextChapter: () => void | Promise<void>,
   prevChapter: () => void | Promise<void>,
+  horizontalPlayback?: HorizontalPlayback,
 ) {
   let autoScrollId: number | null = null
   let autoParagraphTimer: number | null = null
@@ -30,6 +37,7 @@ export function useReaderAutoPlayback(
   let autoReadingProcessing = false
   let speechRestartTimer: number | null = null
   let isSpeechTransitioning = false
+  let activeSpeechParagraph: HTMLElement | null = null
   let currentSpeechParagraph: HTMLElement | null = null
   let currentSpeechSegments: { text: string; nextParagraph: HTMLElement | null }[] = []
   let currentSpeechSegmentIndex = 0
@@ -68,17 +76,27 @@ export function useReaderAutoPlayback(
   }
 
   function getCurrentParagraph() {
-    const reading = chapterTextRef.value?.querySelector('.reading') as HTMLElement | null
-    if (reading) return reading
+    if ((store.isSpeaking || isSpeechTransitioning) && activeSpeechParagraph) {
+      return activeSpeechParagraph
+    }
+    const reading = scrollContainerRef.value?.querySelector('.reading') as HTMLElement | null
+    if (store.isSpeaking && reading) return reading
 
     const container = scrollContainerRef.value
     if (!container) return null
 
+    if (horizontalPlayback?.isEnabled.value && chapterTextRef.value) {
+      const pages = Array.from(chapterTextRef.value.querySelectorAll('.horizontal-page')) as HTMLElement[]
+      const pageIndex = Math.max(0, Math.min(pages.length - 1, horizontalPlayback.getPageIndex()))
+      const paragraphs = Array.from(pages[pageIndex]?.querySelectorAll('p') || []) as HTMLElement[]
+      return paragraphs.find((paragraph) => paragraph.innerText.trim()) || null
+    }
+
     const list = getFilteredParagraphs()
+    const containerRect = container.getBoundingClientRect()
+    const anchorTop = containerRect.top + 40
     for (const paragraph of list) {
-      const top = paragraph.offsetTop - container.scrollTop
-      const bottom = top + paragraph.offsetHeight
-      if (bottom > 40) {
+      if (paragraph.getBoundingClientRect().bottom > anchorTop) {
         return paragraph
       }
     }
@@ -94,7 +112,19 @@ export function useReaderAutoPlayback(
   function getPrevParagraphFrom(current: HTMLElement | null) {
     const list = getFilteredParagraphs()
     const index = current ? list.indexOf(current) : -1
-    if (index > 0) return list[index - 1]
+    if (index > 0) {
+      const paragraphId = current?.dataset.readerParagraph
+      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+        if (!paragraphId || list[cursor]?.dataset.readerParagraph !== paragraphId) {
+          const previousId = list[cursor]?.dataset.readerParagraph
+          if (!previousId) return list[cursor] || null
+          while (cursor > 0 && list[cursor - 1]?.dataset.readerParagraph === previousId) {
+            cursor -= 1
+          }
+          return list[cursor] || null
+        }
+      }
+    }
     return null
   }
 
@@ -106,8 +136,27 @@ export function useReaderAutoPlayback(
   function getNextParagraphFrom(current: HTMLElement | null) {
     const list = getFilteredParagraphs()
     const index = current ? list.indexOf(current) : -1
-    if (index >= 0 && index < list.length - 1) return list[index + 1]
+    if (index >= 0 && index < list.length - 1) {
+      const paragraphId = current?.dataset.readerParagraph
+      for (let cursor = index + 1; cursor < list.length; cursor += 1) {
+        if (!paragraphId || list[cursor]?.dataset.readerParagraph !== paragraphId) {
+          return list[cursor] || null
+        }
+      }
+    }
     return null
+  }
+
+  function getLogicalParagraphText(paragraph: HTMLElement | null) {
+    const currentText = paragraph?.innerText.trim() || ''
+    const paragraphId = paragraph?.dataset.readerParagraph
+    if (!paragraphId) return currentText
+
+    return getFilteredParagraphs()
+      .filter((item) => item.dataset.readerParagraph === paragraphId)
+      .map((item) => item.innerText.trim())
+      .filter(Boolean)
+      .join('')
   }
 
   function splitLongSentence(sentence: string) {
@@ -131,7 +180,7 @@ export function useReaderAutoPlayback(
   }
 
   function buildParagraphSpeechChunks(paragraph: HTMLElement | null) {
-    const rawText = paragraph?.innerText.trim() || ''
+    const rawText = getLogicalParagraphText(paragraph)
     if (!rawText) return [] as string[]
 
     const sentences = rawText
@@ -169,11 +218,11 @@ export function useReaderAutoPlayback(
   }
 
   function buildMergedSpeechSegment(paragraph: HTMLElement | null) {
-    const currentText = paragraph?.innerText.trim() || ''
+    const currentText = getLogicalParagraphText(paragraph)
     if (!currentText) {
       return {
         text: '',
-        nextParagraph: getNextParagraph(),
+        nextParagraph: getNextParagraphFrom(paragraph),
       }
     }
 
@@ -182,18 +231,32 @@ export function useReaderAutoPlayback(
     if (startIndex < 0) {
       return {
         text: currentText,
-        nextParagraph: getNextParagraph(),
+        nextParagraph: getNextParagraphFrom(paragraph),
       }
     }
 
     const mergedTexts: string[] = [currentText]
     let mergedLength = currentText.length
-    let cursorIndex = startIndex + 1
+    const indexAfterLogicalParagraph = (index: number) => {
+      const paragraphId = list[index]?.dataset.readerParagraph
+      let nextIndex = index + 1
+      while (paragraphId && list[nextIndex]?.dataset.readerParagraph === paragraphId) {
+        nextIndex += 1
+      }
+      return nextIndex
+    }
+    let cursorIndex = indexAfterLogicalParagraph(startIndex)
+    const currentPage = horizontalPlayback?.isEnabled.value
+      ? paragraph?.closest('.horizontal-page')
+      : null
 
     while (cursorIndex < list.length && mergedLength < OPENAI_MERGED_SEGMENT_CHAR_LIMIT) {
-      const nextText = list[cursorIndex]?.innerText.trim() || ''
+      if (currentPage && list[cursorIndex]?.closest('.horizontal-page') !== currentPage) {
+        break
+      }
+      const nextText = getLogicalParagraphText(list[cursorIndex] || null)
       if (!nextText) {
-        cursorIndex += 1
+        cursorIndex = indexAfterLogicalParagraph(cursorIndex)
         continue
       }
       if (mergedLength + nextText.length > OPENAI_MERGED_SEGMENT_CHAR_LIMIT) {
@@ -201,7 +264,7 @@ export function useReaderAutoPlayback(
       }
       mergedTexts.push(nextText)
       mergedLength += nextText.length
-      cursorIndex += 1
+      cursorIndex = indexAfterLogicalParagraph(cursorIndex)
     }
 
     return {
@@ -223,7 +286,7 @@ export function useReaderAutoPlayback(
     }
 
     const paragraphChunks = buildParagraphSpeechChunks(paragraph)
-    const nextParagraph = getNextParagraph()
+    const nextParagraph = getNextParagraphFrom(paragraph)
     return paragraphChunks.map((text, index) => ({
       text,
       nextParagraph: index < paragraphChunks.length - 1 ? paragraph : nextParagraph,
@@ -231,9 +294,9 @@ export function useReaderAutoPlayback(
   }
 
   function ensureSpeechChunkState(paragraph: HTMLElement) {
-    if (store.speechConfig.provider !== 'openai') {
+    if (store.speechConfig.provider === 'system') {
       return {
-        text: paragraph.innerText.trim(),
+        text: getLogicalParagraphText(paragraph),
         nextParagraph: getNextParagraphFrom(paragraph),
       }
     }
@@ -253,7 +316,7 @@ export function useReaderAutoPlayback(
   function getUpcomingSpeechChunks(startParagraph: HTMLElement | null) {
     const chunks: string[] = []
 
-    if (store.speechConfig.provider !== 'openai') {
+    if (store.speechConfig.provider === 'system') {
       return chunks
     }
 
@@ -277,9 +340,7 @@ export function useReaderAutoPlayback(
         if (chunks.length >= OPENAI_PRELOAD_CHUNK_LIMIT) break
         chunks.push(chunk)
       }
-      const list = getFilteredParagraphs()
-      const index = list.indexOf(cursor)
-      cursor = index >= 0 ? (list[index + 1] || null) : null
+      cursor = getNextParagraphFrom(cursor)
     }
 
     return chunks
@@ -292,6 +353,16 @@ export function useReaderAutoPlayback(
   function showParagraph(paragraph: HTMLElement | null, smooth = true) {
     const container = scrollContainerRef.value
     if (!container || !paragraph) return
+
+    if (horizontalPlayback?.isEnabled.value && chapterTextRef.value) {
+      const page = paragraph.closest('.horizontal-page')
+      const pages = Array.from(chapterTextRef.value.querySelectorAll('.horizontal-page'))
+      const pageIndex = page ? pages.indexOf(page) : -1
+      if (pageIndex >= 0 && pageIndex !== horizontalPlayback.getPageIndex()) {
+        horizontalPlayback.showPage(pageIndex)
+      }
+      return
+    }
 
     const targetTop = Math.max(0, paragraph.offsetTop - 24)
     container.scrollTo({
@@ -409,7 +480,7 @@ export function useReaderAutoPlayback(
       resetSpeechChunkState()
       return
     }
-    if (isSpeechTransitioning) return
+    if (isSpeechTransitioning && !interruptCurrent) return
     isSpeechTransitioning = true
     resetSpeechChunkState()
     if (interruptCurrent) {
@@ -443,7 +514,8 @@ export function useReaderAutoPlayback(
 
     const continueDelay = store.speechConfig.provider === 'system'
       ? ((isSafariSpeechDelayBrowser() && !store.systemTtsNativeEventsReliable) ? 160 : 40)
-      : 120
+      : 0
+    const chapterContinueDelay = store.speechConfig.provider === 'system' ? continueDelay : 40
 
     if (paragraph) {
       isSpeechTransitioning = true
@@ -480,7 +552,7 @@ export function useReaderAutoPlayback(
           }
           isSpeechTransitioning = false
           startSpeech(getFilteredParagraphs()[0] || null, false)
-        }, continueDelay)
+        }, chapterContinueDelay)
       })
       .catch(() => {
         isSpeechTransitioning = false
@@ -503,6 +575,7 @@ export function useReaderAutoPlayback(
       return
     }
 
+    activeSpeechParagraph = current
     markReadingParagraph(current)
     showParagraph(current)
     const chunk = ensureSpeechChunkState(current)
@@ -532,7 +605,7 @@ export function useReaderAutoPlayback(
           chunkIndex: currentSpeechSegmentIndex,
           chunkCount: currentSpeechSegments.length,
         })
-        if (store.speechConfig.provider === 'openai' && currentSpeechParagraph === current && currentSpeechSegmentIndex < currentSpeechSegments.length - 1) {
+        if (store.speechConfig.provider !== 'system' && currentSpeechParagraph === current && currentSpeechSegmentIndex < currentSpeechSegments.length - 1) {
           currentSpeechSegmentIndex += 1
           continueSpeechTarget(current, false)
           return
@@ -659,6 +732,7 @@ export function useReaderAutoPlayback(
 
   function disposeAutoPlayback() {
     cancelSpeechTransition()
+    activeSpeechParagraph = null
     stopAutoScroll()
   }
 

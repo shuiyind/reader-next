@@ -7,22 +7,65 @@
     <div class="settings-sep"></div>
 
     <div class="settings-body">
-      <!-- 阅读主题 -->
       <div class="setting-row">
-        <label>阅读主题</label>
-        <div class="theme-swatches">
-          <button
-            v-for="(t, i) in themePresets"
-            :key="i"
-            class="swatch"
-            :class="{ active: store.themeIndex === i && !store.isNight }"
-            :style="{ background: t.body }"
-            @click="store.setThemeIndex(i)"
-          >
-            <svg v-if="store.themeIndex === i && !store.isNight" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5" /></svg>
-          </button>
+        <label>显示模式</label>
+        <div class="btn-group">
+          <button class="opt-btn" :class="{ active: store.themeMode === 'system' }" @click="store.setThemeMode('system')">跟随系统</button>
+          <button class="opt-btn" :class="{ active: store.themeMode === 'light' }" @click="store.setThemeMode('light')">白天</button>
+          <button class="opt-btn" :class="{ active: store.themeMode === 'dark' }" @click="store.setThemeMode('dark')">黑夜</button>
         </div>
       </div>
+
+      <div class="theme-style-grid">
+        <section class="theme-style-card">
+          <div class="theme-style-title">白天样式</div>
+          <label class="color-field">
+            <span>背景颜色</span>
+            <input type="color" :value="store.dayColorStyle.backgroundColor" @input="updateColor('light', 'backgroundColor', $event)" />
+            <code>{{ store.dayColorStyle.backgroundColor }}</code>
+          </label>
+          <label class="color-field">
+            <span>文字颜色</span>
+            <input type="color" :value="store.dayColorStyle.textColor" @input="updateColor('light', 'textColor', $event)" />
+            <code>{{ store.dayColorStyle.textColor }}</code>
+          </label>
+          <div class="theme-swatches" aria-label="白天预设">
+            <button
+              v-for="item in dayThemePresets"
+              :key="item.index"
+              class="swatch"
+              :title="item.preset.name"
+              :style="{ background: item.preset.body, color: item.preset.fontColor }"
+              @click="store.applyThemePreset('light', item.index)"
+            ><span>A</span></button>
+          </div>
+        </section>
+
+        <section class="theme-style-card">
+          <div class="theme-style-title">黑夜样式</div>
+          <label class="color-field">
+            <span>背景颜色</span>
+            <input type="color" :value="store.nightColorStyle.backgroundColor" @input="updateColor('dark', 'backgroundColor', $event)" />
+            <code>{{ store.nightColorStyle.backgroundColor }}</code>
+          </label>
+          <label class="color-field">
+            <span>文字颜色</span>
+            <input type="color" :value="store.nightColorStyle.textColor" @input="updateColor('dark', 'textColor', $event)" />
+            <code>{{ store.nightColorStyle.textColor }}</code>
+          </label>
+          <div class="theme-swatches" aria-label="黑夜预设">
+            <button
+              v-for="item in nightThemePresets"
+              :key="item.index"
+              class="swatch"
+              :title="item.preset.name"
+              :style="{ background: item.preset.body, color: item.preset.fontColor }"
+              @click="store.applyThemePreset('dark', item.index)"
+            ><span>A</span></button>
+          </div>
+        </section>
+      </div>
+      <ThemeBackgroundSettings />
 
       <!-- 正文字体 -->
       <div class="setting-row">
@@ -215,20 +258,26 @@
         <div class="btn-group">
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'system' }" @click="store.setSpeechProvider('system')">系统语音</button>
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'openai' }" @click="store.setSpeechProvider('openai')">OpenAI Speech</button>
+          <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'azure' }" @click="store.setSpeechProvider('azure')">Azure Speech</button>
         </div>
       </div>
 
-      <div v-if="store.speechConfig.provider === 'system'" class="setting-row setting-row-top">
-        <label>朗读音源</label>
-        <select class="voice-select" :value="store.speechConfig.voiceName" @change="handleVoiceChange">
-          <option value="">系统默认</option>
-          <option v-for="voice in store.voiceList" :key="voice.name" :value="voice.name">
-            {{ voice.name }} ({{ voice.lang }})
-          </option>
-        </select>
-      </div>
+      <template v-if="store.speechConfig.provider === 'system'">
+        <div class="setting-row setting-row-top">
+          <label>朗读音源</label>
+          <select class="voice-select" :value="store.speechConfig.voiceName" @change="handleVoiceChange">
+            <option value="">系统默认</option>
+            <option v-for="voice in store.voiceList" :key="voice.name" :value="voice.name">
+              {{ voice.name }} ({{ voice.lang }})
+            </option>
+          </select>
+        </div>
+        <div class="setting-hint">
+          Microsoft Edge 暴露的微软在线语音会自动出现在音源列表中；此模式使用浏览器 Web Speech 能力，不调用未公开的 Edge“大声朗读”接口。
+        </div>
+      </template>
 
-      <template v-else>
+      <template v-else-if="store.speechConfig.provider === 'openai'">
         <div class="setting-row">
           <label>模型来源</label>
           <div class="btn-group">
@@ -343,8 +392,81 @@
 
         <div class="setting-hint">
           少字多请求会按短句细分并预加载更多片段；多字少请求会合并较短段落，只预加载下一段。
-          <template v-if="store.speechConfig.openaiSource === 'browser'">URL 和 Key 仅保存在当前浏览器。</template>
+          <template v-if="store.speechConfig.openaiSource === 'browser'">支持填写基础地址、`/v1` 地址或完整 `/audio/speech` 地址。HTTP、本机和局域网地址由浏览器直连；公共 HTTPS 地址由 Reader Next 后端转发以规避跨域限制。URL 和 Key 配置仅保存在当前浏览器，Key 不写入 WebDAV 备份。</template>
           <template v-else>后端配置由管理员维护，权限不足时朗读请求会失败。</template>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="setting-row setting-row-top">
+          <label>Azure 区域</label>
+          <input
+            class="voice-select"
+            type="text"
+            :value="store.speechConfig.azureRegion"
+            placeholder="eastasia"
+            autocomplete="off"
+            @input="store.setAzureSpeechRegion(($event.target as HTMLInputElement).value)"
+          >
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>Speech Key</label>
+          <input
+            class="voice-select"
+            type="password"
+            :value="store.speechConfig.azureApiKey"
+            placeholder="Azure Speech 资源密钥"
+            autocomplete="off"
+            @input="store.setAzureSpeechApiKey(($event.target as HTMLInputElement).value)"
+          >
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>Azure 音色</label>
+          <input
+            class="voice-select"
+            type="text"
+            list="azure-speech-voices"
+            :value="store.speechConfig.azureVoice"
+            placeholder="zh-CN-XiaoxiaoNeural"
+            @input="store.setAzureSpeechVoice(($event.target as HTMLInputElement).value)"
+          >
+          <datalist id="azure-speech-voices">
+            <option value="zh-CN-XiaoxiaoNeural" />
+            <option value="zh-CN-XiaoyiNeural" />
+            <option value="zh-CN-YunxiNeural" />
+            <option value="zh-CN-YunjianNeural" />
+            <option value="zh-CN-YunyangNeural" />
+            <option value="zh-TW-HsiaoChenNeural" />
+            <option value="zh-HK-HiuMaanNeural" />
+          </datalist>
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>音频格式</label>
+          <select
+            class="voice-select"
+            :value="store.speechConfig.azureFormat"
+            @change="store.setAzureSpeechFormat(($event.target as HTMLSelectElement).value as 'audio-24khz-48kbitrate-mono-mp3' | 'audio-48khz-96kbitrate-mono-mp3' | 'riff-24khz-16bit-mono-pcm' | 'webm-24khz-16bit-mono-opus')"
+          >
+            <option value="audio-24khz-48kbitrate-mono-mp3">MP3 24kHz / 48kbps</option>
+            <option value="audio-48khz-96kbitrate-mono-mp3">MP3 48kHz / 96kbps</option>
+            <option value="riff-24khz-16bit-mono-pcm">WAV 24kHz PCM</option>
+            <option value="webm-24khz-16bit-mono-opus">WebM 24kHz Opus</option>
+          </select>
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>请求模式</label>
+          <div class="btn-group">
+            <button class="opt-btn" :class="{ active: store.speechConfig.openaiRequestMode === 'chunked' }" @click="store.setOpenAISpeechRequestMode('chunked')">少字多请求</button>
+            <button class="opt-btn" :class="{ active: store.speechConfig.openaiRequestMode === 'merged' }" @click="store.setOpenAISpeechRequestMode('merged')">多字少请求</button>
+          </div>
+        </div>
+
+        <div class="setting-hint">
+          使用微软官方 Azure Speech REST API，请填写 Speech 资源区域、密钥和完整音色名。Azure 语速范围为 0.5–2.0，语调范围为 0.5–1.5。密钥仅保存在当前浏览器且不写入 WebDAV 备份，语音请求经 Reader Next 后端转发。
         </div>
       </template>
 
@@ -357,7 +479,7 @@
         </div>
       </div>
 
-      <div v-if="store.speechConfig.provider === 'system'" class="setting-row">
+      <div v-if="store.speechConfig.provider !== 'openai'" class="setting-row">
         <label>朗读音调</label>
         <div class="stepper">
           <button class="step-btn" @click="adjustSpeechPitch(-0.1)">—</button>
@@ -398,14 +520,24 @@ import { computed, onMounted, ref } from 'vue'
 import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
 import { useAiBookStore } from '../../stores/aiBook'
 import { useAppStore } from '../../stores/app'
+import ThemeBackgroundSettings from '../ThemeBackgroundSettings.vue'
 
 const store = useReaderStore()
 const aiBookStore = useAiBookStore()
 const appStore = useAppStore()
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
+const dayThemePresets = themePresets.slice(0, -2).map((preset, index) => ({ preset, index }))
+const nightThemePresets = themePresets.slice(-2).map((preset, offset) => ({
+  preset,
+  index: themePresets.length - 2 + offset,
+}))
 const serverModelLoaded = ref(false)
 const canUseServerModel = computed(() => Boolean(aiBookStore.serverModelConfig?.canUseServerModel))
+
+function updateColor(mode: 'light' | 'dark', key: 'backgroundColor' | 'textColor', event: Event) {
+  store.updateReaderColor(mode, key, (event.target as HTMLInputElement).value)
+}
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -555,6 +687,166 @@ onMounted(async () => {
   opacity: 0.65;
 }
 
+.theme-hint {
+  margin-top: -12px;
+}
+
+.theme-style-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.theme-style-card {
+  padding: 14px;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 14px;
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.background-style-card {
+  padding: 14px;
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 14px;
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.background-style-head,
+.background-setting-row,
+.background-overlay-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.background-subtitle {
+  margin-top: -6px;
+  font-size: 11px;
+  opacity: 0.62;
+}
+
+.background-sync-status {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--color-primary);
+  opacity: 1;
+}
+
+.background-sync-status[data-state='pending'],
+.background-sync-status[data-state='local'] {
+  color: #c27a16;
+}
+
+.background-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.background-upload {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.background-upload input {
+  display: none;
+}
+
+.background-upload.disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.danger-btn {
+  color: #c43d3d;
+  border-color: rgba(196, 61, 61, 0.3);
+}
+
+.background-preview,
+.background-empty {
+  height: 128px;
+  margin-top: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(127, 127, 127, 0.18);
+}
+
+.background-preview {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 650;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.background-empty {
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: inherit;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.58;
+  box-sizing: border-box;
+}
+
+.background-setting-row,
+.background-overlay-row {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.background-setting-row > span,
+.background-overlay-row > span {
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.background-overlay-row input {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--color-primary, #c97f3a);
+}
+
+.background-overlay-row code {
+  width: 38px;
+  text-align: right;
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+.theme-style-title {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.color-field {
+  display: grid;
+  grid-template-columns: 1fr 36px 64px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.color-field input {
+  width: 36px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 8px;
+  background: transparent;
+}
+
+.color-field code {
+  font-size: 11px;
+  opacity: 0.72;
+}
+
 .server-speech-note {
   margin-left: 90px;
   padding: 12px 14px;
@@ -598,6 +890,11 @@ onMounted(async () => {
   width: 16px;
   height: 16px;
   color: var(--color-primary, #c97f3a);
+}
+
+.swatch span {
+  font-size: 14px;
+  font-weight: 700;
 }
 
 /* Button groups */
@@ -677,6 +974,20 @@ onMounted(async () => {
 @media (max-width: 420px) {
   .read-settings {
     padding: 16px;
+  }
+
+  .theme-style-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .background-style-head,
+  .background-setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .background-actions {
+    justify-content: flex-start;
   }
 
   .settings-header {

@@ -3,10 +3,11 @@
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
     :style="{
-      background: theme.body,
+      ...readerBackgroundStyle,
       color: theme.fontColor,
       fontFamily: currentFontFamily,
       '--color-primary': '#c97f3a',
+      '--reader-status-shadow': store.isNight ? '#000' : '#fff',
       '--reader-summary-sider-width': showSideAiPanel ? `${aiPanelSiderWidth}px` : '0px'
     }"
     @click="handleBackgroundClick"
@@ -36,7 +37,10 @@
     <!-- PC Desktop Toolbars (Always shown) -->
     <ReaderSidebar
       v-if="!isMobile"
+      :show-add-to-shelf="showAddToShelf"
+      :adding-to-shelf="addingToShelf"
       @goHome="goHome"
+      @addToShelf="handleAddToShelf"
       @scrollTop="scrollToTop"
       @scrollBottom="scrollToBottom"
     />
@@ -60,7 +64,14 @@
     <ReaderMobileControls
       v-if="isMobile"
       :show="showControls || !!store.activePanel"
+      :show-add-to-shelf="showAddToShelf"
+      :adding-to-shelf="addingToShelf"
+      :horizontal-page-mode="isHorizontalPageMode"
+      :current-page="horizontalCurrentPage"
+      :total-pages="horizontalPageCount"
+      :page-progress="horizontalPageProgress"
       @goHome="goHome"
+      @addToShelf="handleAddToShelf"
       @scrollTop="scrollToTop"
       @scrollBottom="scrollToBottom"
       @prev="prevChapter"
@@ -71,6 +82,7 @@
       @ai="openAiBook"
       @tts="handleTTS"
       @progress="openCachePanel"
+      @seekPage="seekHorizontalPage"
     />
 
     <ReaderTtsPanel
@@ -86,10 +98,13 @@
       :voice-name="store.speechConfig.voiceName"
       :rate="store.speechConfig.speechRate"
       :pitch="store.speechConfig.speechPitch"
-      :supports-pitch="store.speechConfig.provider === 'system'"
+      :volume="store.speechConfig.speechVolume"
+      :supports-pitch="store.speechConfig.provider === 'system' || store.speechConfig.provider === 'azure'"
       :openai-model="store.speechConfig.openaiModel"
       :openai-voice="store.speechConfig.openaiVoice"
       :openai-source="store.speechConfig.openaiSource"
+      :azure-region="store.speechConfig.azureRegion"
+      :azure-voice="store.speechConfig.azureVoice"
       :stop-after-minutes="store.speechConfig.stopAfterMinutes"
       :timer-text="speechTimerText"
       @close="closeTTSPanel"
@@ -99,10 +114,24 @@
       @next="speechNext"
       @voice-change="changeVoice"
       @openai-voice-change="changeOpenAIVoice"
+      @azure-voice-change="changeAzureVoice"
       @rate-change="adjustSpeechRate"
       @pitch-change="adjustSpeechPitch"
+      @volume-change="changeSpeechVolume"
       @timer-change="setSpeechTimer"
     />
+
+    <div class="reader-page-status reader-ui-font">
+      <div class="reader-page-status-item status-chapter" :title="store.currentChapter?.title || ''">
+        <span v-if="store.chapters.length">第 {{ store.currentIndex + 1 }} 章 / 共 {{ store.chapters.length }} 章</span>
+        <span class="status-chapter-name">{{ store.currentChapter?.title || '正在加载章节' }}</span>
+      </div>
+      <div class="reader-page-status-item status-book" :title="store.book?.name || ''">
+        {{ store.book?.name || '阅读' }}
+      </div>
+      <div class="reader-page-status-item status-progress">全书 {{ store.readingProgress }}</div>
+      <time class="reader-page-status-item status-time">{{ currentTimeText }}</time>
+    </div>
 
     <!-- Main Content Area -->
     <div
@@ -1075,9 +1104,10 @@
       >
         <div class="selection-menu-text">{{ selectionMenu.text }}</div>
         <div class="selection-menu-actions">
+          <button @click="startSpeechFromSelection">从本段听</button>
           <button @click="addSelectionBookmark">加入书签</button>
-          <button @click="addSelectionReplaceRule('book')">按本书替换</button>
-          <button @click="addSelectionReplaceRule('source')">按书源替换</button>
+          <button @click="addSelectionReplaceRule('book')">本书净化</button>
+          <button @click="addSelectionReplaceRule('source')">书源净化</button>
         </div>
       </div>
     </Transition>
@@ -1093,9 +1123,10 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useReaderStore, fontPresets } from '../stores/reader'
+import { useBookshelfStore } from '../stores/bookshelf'
 import { useAiBookStore } from '../stores/aiBook'
 import { useAppStore } from '../stores/app'
-import { getBookInfo } from '../api/bookshelf'
+import { getBookInfo, getShelfBook, saveBook } from '../api/bookshelf'
 import { getAiBookMemory } from '../api/ai/book'
 import {
   getChapterSummary,
@@ -1108,6 +1139,13 @@ import { countBrowserBookCache } from '../utils/browserCache'
 import { APP_VIEWPORT_CHANGE_EVENT, syncViewportSize } from '../utils/viewport'
 import { isReaderInteractiveClickTarget } from '../utils/readerClick'
 import { createReaderProgressAutoSaveScheduler, createReaderProgressExitSaver } from '../utils/readerProgressAutoSave'
+import { buildReaderShelfBook, isBookOnShelf } from '../utils/readerShelf'
+import {
+  chooseSavedChapterProgress,
+  clampPageIndex,
+  getPageIndexFromProgress,
+  getPageProgress,
+} from '../utils/readerPagination'
 import { buildChapterSummaryIdentity, isCurrentChapterSummaryIdentity } from '../utils/chapterSummaryState'
 import { buildSummaryRelationshipGraph } from '../utils/summaryRelationshipGraph'
 import { chooseChapterSummaryPlacement, clampChapterSummarySiderWidth, getChapterSummaryFontSize } from '../utils/chapterSummaryLayout'
@@ -1124,6 +1162,12 @@ import { useReaderSelection } from '../composables/useReaderSelection'
 import { useHorizontalPaging } from '../composables/useHorizontalPaging'
 import { useContinuousReading } from '../composables/useContinuousReading'
 import { useReaderAutoPlayback } from '../composables/useReaderAutoPlayback'
+import {
+  buildReaderBackgroundStyle,
+  formatReaderChapterHtml,
+  formatReaderClock,
+  formatSpeechTimer,
+} from './reader/readerViewPresentation'
 
 const ReaderCatalog = defineAsyncComponent(() => import('../components/reader/ReaderCatalog.vue'))
 const ReadSettings = defineAsyncComponent(() => import('../components/reader/ReadSettings.vue'))
@@ -1137,6 +1181,7 @@ const ReaderSearchPanel = defineAsyncComponent(() => import('../components/reade
 
 const router = useRouter()
 const store = useReaderStore()
+const shelfStore = useBookshelfStore()
 const aiBookStore = useAiBookStore()
 const appStore = useAppStore()
 const READER_POSITION_PREFIX = 'reader-position:'
@@ -1159,6 +1204,12 @@ function debugPositionLog(message: string, payload?: unknown) {
 
 const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
+
+const readerBackgroundStyle = computed(() => {
+  const background = store.readerBackgroundConfig
+  const imageUrl = background.readerEnabled ? store.readerBackgroundUrl : ''
+  return buildReaderBackgroundStyle(theme.value.body, background, imageUrl)
+})
 const chromeTheme = computed(() => {
   if (store.isNight || appStore.theme === 'dark') {
     return {
@@ -1174,16 +1225,23 @@ const scrollContainerRef = ref<HTMLElement>()
 const chapterTextRef = ref<HTMLElement>()
 const showControls = ref(false)
 const isMobile = ref(false)
+const suppressHorizontalPageTransition = ref(false)
+const readerShelfStatus = ref<'checking' | 'available' | 'added'>('checking')
+const addingToShelf = ref(false)
+const showAddToShelf = computed(() => readerShelfStatus.value === 'available' || addingToShelf.value)
 const viewportWidth = ref(typeof window === 'undefined' ? 0 : window.innerWidth)
+let readerShelfCheckRequestId = 0
 let speechTimerTicker: number | null = null
 let suppressNextTapUntil = 0
 let restorePositionTimer: number | null = null
 let persistPositionTimer: number | null = null
+let horizontalTransitionSuppressionId = 0
 const pendingRestorePosition = ref<SavedReadingPosition | null>(null)
 let pendingRestoreAttempts = 0
 let suppressPositionSaveUntil = 0
 let suppressContinuousScrollSyncUntil = 0
 let suppressContinuousAutoLoadUntil = 0
+let pendingChapterNavigationFallback: 'start' | 'end' | null = null
 const restoreStabilizeTimers: number[] = []
 const serverProgressAutoSaveScheduler = createReaderProgressAutoSaveScheduler({
   intervalMs: SERVER_PROGRESS_AUTOSAVE_MS,
@@ -1256,18 +1314,8 @@ let chapterSummaryTimer: number | null = null
 let chapterSummaryRequestId = 0
 let chapterSummaryRelationshipRequestId = 0
 const speechTimerNow = ref(Date.now())
-const speechTimerText = computed(() => {
-  if (!store.speechStopAt) return ''
-  const remainMs = store.speechStopAt - speechTimerNow.value
-  if (remainMs <= 0) return ''
-  const totalMinutes = Math.ceil(remainMs / 60000)
-  if (totalMinutes >= 60) {
-    const hours = Math.floor(totalMinutes / 60)
-    const minutes = totalMinutes % 60
-    return minutes ? `${hours}小时${minutes}分钟后停止` : `${hours}小时后停止`
-  }
-  return `${totalMinutes}分钟后停止`
-})
+const currentTimeText = computed(() => formatReaderClock(speechTimerNow.value))
+const speechTimerText = computed(() => formatSpeechTimer(store.speechStopAt, speechTimerNow.value))
 const {
   showSearch,
   searchQuery,
@@ -1295,6 +1343,7 @@ const {
   handleSelectionChange,
   addSelectionBookmark,
   addSelectionReplaceRule,
+  getSelectionStartParagraph,
   clearSelectionState,
   disposeSelection,
 } = useReaderSelection(
@@ -1633,47 +1682,11 @@ const currentFontFamily = computed(() => {
 })
 
 function formatChapterHtml(rawText: string) {
-  if (!rawText) return ''
-  let text = rawText
-
-  if (showSearch.value && searchQuery.value) {
-    try {
-      const regex = new RegExp(`(${searchQuery.value})`, 'gi')
-      text = text.replace(regex, '<mark class="search-highlight">$1</mark>')
-    } catch { /* invalid regex */ }
-  }
-
-  const stripLeadingIndent = (line: string) => line.replace(/^[\u3000\u00A0 \t]+/, '')
-
-  if (/<[a-z][\s\S]*>/i.test(text)) {
-    const wrapper = document.createElement('div')
-    wrapper.innerHTML = text
-    const paragraphs = Array.from(wrapper.querySelectorAll('p')) as HTMLParagraphElement[]
-    if (paragraphs.length) {
-      paragraphs.forEach((paragraph) => {
-        const plainText = (paragraph.textContent || '').replace(/^[\u3000\u00A0 \t]+/, '').trim()
-        if (!plainText) {
-          paragraph.remove()
-          return
-        }
-        paragraph.innerHTML = paragraph.innerHTML.replace(/^[\u3000\u00A0 \t]+/, '')
-        paragraph.style.marginTop = '0'
-        paragraph.style.marginBottom = `${config.value.paragraphSpacing}em`
-        paragraph.classList.toggle('reader-indent', config.value.firstLineIndent)
-      })
-      return wrapper.innerHTML
-    }
-  }
-
-  return text
-    .split(/\n/)
-    .filter((line: string) => line.trim())
-    .map((line: string) => {
-      const shouldIndent = config.value.firstLineIndent
-      const content = stripLeadingIndent(line.trimEnd())
-      return `<p${shouldIndent ? ' class="reader-indent"' : ''} style="margin-top: 0; margin-bottom: ${config.value.paragraphSpacing}em;">${content}</p>`
-    })
-    .join('')
+  return formatReaderChapterHtml(rawText, {
+    firstLineIndent: config.value.firstLineIndent,
+    paragraphSpacing: config.value.paragraphSpacing,
+    searchQuery: showSearch.value ? searchQuery.value : '',
+  })
 }
 
 function renderChapterHtml(rawText: string) {
@@ -1711,10 +1724,20 @@ const horizontalPageTransform = computed(() => {
   return `translate3d(${-offset}px, 0, 0)`
 })
 const horizontalPageTransitionDuration = computed(() => {
+  if (suppressHorizontalPageTransition.value) return '0ms'
   const duration = Number(config.value.animateDuration) || 0
   if (duration <= 0) return '0ms'
   return `${Math.min(220, duration)}ms`
 })
+const horizontalPageCount = computed(() => Math.max(1, horizontalPages.value.length))
+const horizontalCurrentPage = computed(() => clampPageIndex(
+  horizontalPageIndex.value,
+  horizontalPageCount.value,
+) + 1)
+const horizontalPageProgress = computed(() => getPageProgress(
+  horizontalPageIndex.value,
+  horizontalPageCount.value,
+))
 const {
   continuousChapters,
   continuousLoadingNext,
@@ -1739,8 +1762,8 @@ const {
 )
 
 function syncHorizontalPageState() {
-  const maxPage = Math.max(0, horizontalPages.value.length - 1)
-  const progress = maxPage <= 0 ? 1 : horizontalPageIndex.value / maxPage
+  const maxPage = horizontalPageCount.value - 1
+  const progress = horizontalPageProgress.value
   store.setChapterScrollProgress(progress)
   updateHorizontalEndState()
   if (config.value.enablePreload && maxPage > 0 && horizontalPageIndex.value >= maxPage - 1) {
@@ -1748,6 +1771,13 @@ function syncHorizontalPageState() {
   }
   scheduleSaveReadingPosition()
   serverProgressAutoSaveScheduler.schedule()
+}
+
+function seekHorizontalPage(pageIndex: number) {
+  if (!isHorizontalPageMode.value) return
+  horizontalPageIndex.value = clampPageIndex(pageIndex, horizontalPageCount.value)
+  scrollContainerRef.value?.scrollTo({ left: 0, behavior: 'auto' })
+  syncHorizontalPageState()
 }
 
 function pageForward() {
@@ -1799,6 +1829,45 @@ async function goHome() {
   router.replace('/')
 }
 
+async function refreshReaderShelfStatus() {
+  const requestId = ++readerShelfCheckRequestId
+  const currentBook = store.book
+  if (!currentBook?.bookUrl) {
+    readerShelfStatus.value = 'checking'
+    return
+  }
+  if (isBookOnShelf(shelfStore.books, currentBook.bookUrl)) {
+    readerShelfStatus.value = 'added'
+    return
+  }
+
+  readerShelfStatus.value = 'checking'
+  const shelfBook = await getShelfBook(currentBook.bookUrl).catch(() => null)
+  if (requestId !== readerShelfCheckRequestId || store.book?.bookUrl !== currentBook.bookUrl) return
+  readerShelfStatus.value = shelfBook ? 'added' : 'available'
+}
+
+async function handleAddToShelf() {
+  if (!store.book || addingToShelf.value || readerShelfStatus.value === 'added') return
+  addingToShelf.value = true
+  try {
+    const savedBook = await saveBook(buildReaderShelfBook(
+      store.book,
+      store.currentIndex,
+      store.currentChapter?.title,
+    ))
+    readerShelfCheckRequestId += 1
+    readerShelfStatus.value = 'added'
+    Object.assign(store.book, savedBook)
+    await shelfStore.fetchBooks().catch(() => undefined)
+    appStore.showToast(`"${store.book.name}" 已加入书架`, 'success')
+  } catch (error: unknown) {
+    appStore.showToast((error as Error).message || '加入书架失败', 'error')
+  } finally {
+    addingToShelf.value = false
+  }
+}
+
 function handlePageHide() {
   persistReadingProgressKeepalive()
 }
@@ -1829,8 +1898,9 @@ async function prevChapter() {
   if (targetIndex < 0) return
 
   if (!isContinuousMode.value) {
+    saveReadingPosition({ force: true })
+    pendingChapterNavigationFallback = 'end'
     await store.prevChapter()
-    scrollToTop()
     return
   }
 
@@ -1842,8 +1912,9 @@ async function nextChapter() {
   if (targetIndex >= store.chapters.length) return
 
   if (!isContinuousMode.value) {
+    saveReadingPosition({ force: true })
+    pendingChapterNavigationFallback = 'start'
     await store.nextChapter()
-    scrollToTop()
     return
   }
 
@@ -1886,7 +1957,11 @@ function scrollToBottom() {
   }
 }
 
-function getPositionStorageKey() {
+function getPositionStorageKey(chapterIndex = store.currentIndex) {
+  return store.book?.bookUrl ? `${READER_POSITION_PREFIX}${store.book.bookUrl}:${chapterIndex}` : ''
+}
+
+function getLegacyPositionStorageKey() {
   return store.book?.bookUrl ? `${READER_POSITION_PREFIX}${store.book.bookUrl}` : ''
 }
 
@@ -1916,46 +1991,62 @@ function loadSavedReadingPosition() {
     return
   }
   try {
-    const raw = localStorage.getItem(key)
-    const localSaved = raw ? JSON.parse(raw) as SavedReadingPosition : null
+    const legacyKey = getLegacyPositionStorageKey()
+    const chapterRaw = localStorage.getItem(key)
+    const legacyRaw = legacyKey ? localStorage.getItem(legacyKey) : null
+    const chapterSaved = chapterRaw ? JSON.parse(chapterRaw) as SavedReadingPosition : null
+    const legacySaved = legacyRaw ? JSON.parse(legacyRaw) as SavedReadingPosition : null
     const serverSaved = buildServerSavedPosition()
-
-    let selected: SavedReadingPosition | null = null
-    let source: 'local' | 'server' | 'none' = 'none'
-
-    if (localSaved && localSaved.chapterIndex === store.currentIndex) {
-      selected = localSaved
-      source = 'local'
-    }
-
-    if (serverSaved && serverSaved.chapterIndex === store.currentIndex) {
-      if (!selected || normalizePositionTimestamp(serverSaved.updatedAt) > normalizePositionTimestamp(selected.updatedAt)) {
-        selected = serverSaved
-        source = 'server'
-      }
-    }
+    const normalizedChapterSaved = chapterSaved
+      ? { ...chapterSaved, updatedAt: normalizePositionTimestamp(chapterSaved.updatedAt) }
+      : null
+    const normalizedLegacySaved = legacySaved
+      ? { ...legacySaved, updatedAt: normalizePositionTimestamp(legacySaved.updatedAt) }
+      : null
+    const eligibleServerSaved = pendingChapterNavigationFallback && !chapterSaved && !legacySaved
+      ? null
+      : serverSaved
+    const selection = chooseSavedChapterProgress(
+      store.currentIndex,
+      normalizedChapterSaved,
+      normalizedLegacySaved,
+      eligibleServerSaved,
+    )
+    const selected = selection.position
+    const source = selection.source
 
     if (!selected) {
-      pendingRestorePosition.value = null
+      pendingRestorePosition.value = pendingChapterNavigationFallback
+        ? {
+            chapterIndex: store.currentIndex,
+            progress: pendingChapterNavigationFallback === 'end' ? 1 : 0,
+            updatedAt: Date.now(),
+          }
+        : null
       pendingRestoreAttempts = 0
       clearRestoreStabilizers()
-      debugPositionLog(raw ? 'ignored saved position' : 'no saved position', {
+      debugPositionLog(chapterRaw || legacyRaw ? 'ignored saved position' : 'no saved position', {
         key,
         currentIndex: store.currentIndex,
-        localSaved,
+        chapterSaved,
+        legacySaved,
         serverSaved,
+        fallback: pendingChapterNavigationFallback,
       })
+      pendingChapterNavigationFallback = null
       return
     }
 
     pendingRestorePosition.value = selected
+    pendingChapterNavigationFallback = null
     pendingRestoreAttempts = 0
     clearRestoreStabilizers()
     debugPositionLog('loaded saved position', {
       key,
       saved: selected,
       source,
-      localSaved,
+      chapterSaved,
+      legacySaved,
       serverSaved,
       currentIndex: store.currentIndex,
       accepted: !!pendingRestorePosition.value,
@@ -2079,22 +2170,30 @@ function restoreReadingPositionInternal(saved: SavedReadingPosition | null, fina
   }
 
   if (isHorizontalPageMode.value) {
-    if (store.loading || container.scrollWidth <= container.clientWidth + 4) {
+    if (store.loading || !horizontalPages.value.length) {
       debugPositionLog('restore waiting: horizontal content not ready', {
         saved,
         loading: store.loading,
-        scrollWidth: container.scrollWidth,
-        clientWidth: container.clientWidth,
+        pageCount: horizontalPages.value.length,
       })
       return false
     }
-    const maxScroll = Math.max(0, container.scrollWidth - container.clientWidth)
-    container.scrollTo({ left: maxScroll * Math.max(0, Math.min(1, saved.progress || 0)), behavior: 'auto' })
+    horizontalPageIndex.value = getPageIndexFromProgress(
+      saved.progress || 0,
+      horizontalPageCount.value,
+    )
+    store.setChapterScrollProgress(horizontalPageProgress.value)
+    container.scrollTo({ left: 0, behavior: 'auto' })
+    updateHorizontalEndState()
     if (finalize) {
       pendingRestorePosition.value = null
       pendingRestoreAttempts = 0
     }
-    debugPositionLog('restored horizontal position', { saved, maxScroll })
+    debugPositionLog('restored horizontal position', {
+      saved,
+      pageIndex: horizontalPageIndex.value,
+      pageCount: horizontalPageCount.value,
+    })
     return true
   }
 
@@ -2260,7 +2359,22 @@ const {
   chapterTextRef,
   nextChapter,
   prevChapter,
+  {
+    isEnabled: isHorizontalPageMode,
+    getPageIndex: () => horizontalPageIndex.value,
+    showPage: seekHorizontalPage,
+  },
 )
+
+function startSpeechFromSelection() {
+  const paragraph = getSelectionStartParagraph()
+  if (!paragraph) return
+  cancelSpeechTransition()
+  clearSelectionState()
+  ttsPanelDismissed.value = false
+  showTTSPanel.value = true
+  startSpeech(paragraph)
+}
 
 // Click behavior
 function handleBackgroundClick(e: Event) {
@@ -2603,11 +2717,19 @@ function handleKeydown(e: KeyboardEvent) {
       break
     case 'ArrowRight':
       e.preventDefault()
-      nextChapter()
+      if (isHorizontalPageMode.value) {
+        pageForward()
+      } else {
+        nextChapter()
+      }
       break
     case 'ArrowLeft':
       e.preventDefault()
-      prevChapter()
+      if (isHorizontalPageMode.value) {
+        pageBackward()
+      } else {
+        prevChapter()
+      }
       break
     case 'Home':
       e.preventDefault()
@@ -2680,6 +2802,15 @@ function changeOpenAIVoice(voiceId: string) {
   }
 }
 
+function changeAzureVoice(voiceId: string) {
+  store.setAzureSpeechVoice(voiceId)
+  ttsPanelDismissed.value = false
+  showTTSPanel.value = true
+  if (store.isSpeaking && !store.isPaused) {
+    restartSpeechFromCurrentParagraph()
+  }
+}
+
 function adjustSpeechRate(delta: number) {
   const next = Math.max(0.5, Math.min(3, parseFloat((store.speechConfig.speechRate + delta).toFixed(1))))
   store.setSpeechRate(next)
@@ -2698,6 +2829,12 @@ function adjustSpeechPitch(delta: number) {
   if (store.isSpeaking && !store.isPaused) {
     restartSpeechFromCurrentParagraph()
   }
+}
+
+function changeSpeechVolume(volume: number) {
+  store.setSpeechVolume(volume)
+  ttsPanelDismissed.value = false
+  showTTSPanel.value = true
 }
 
 function setSpeechTimer(minutes: number) {
@@ -2925,6 +3062,10 @@ watch(
 )
 
 watch(() => store.book?.bookUrl, () => {
+  void refreshReaderShelfStatus()
+}, { immediate: true })
+
+watch(() => store.book?.bookUrl, () => {
   resetChapterSummaryRelationshipState()
   if (aiPanelActiveTab.value === 'relationships') {
     void loadChapterSummaryRelationshipMemory()
@@ -2958,16 +3099,49 @@ watch(
 
 watch(
   [() => store.content, () => config.value.fontSize, () => config.value.fontWeight, () => config.value.lineHeight, () => config.value.paragraphSpacing, () => config.value.firstLineIndent, showSearch, searchQuery],
-  () => {
+  async () => {
     if (isHorizontalPageMode.value) {
+      const suppressionId = ++horizontalTransitionSuppressionId
+      suppressHorizontalPageTransition.value = true
       horizontalPageIndex.value = 0
-      rebuildHorizontalPages()
+      await rebuildHorizontalPages()
+      window.setTimeout(() => {
+        if (suppressionId === horizontalTransitionSuppressionId) {
+          suppressHorizontalPageTransition.value = false
+        }
+      }, 0)
     }
   },
 )
 
+watch(
+  () => horizontalPages.value.length,
+  (pageCount) => {
+    const saved = pendingRestorePosition.value
+    if (
+      !isHorizontalPageMode.value
+      || pageCount <= 0
+      || !saved
+      || saved.chapterIndex !== store.currentIndex
+    ) {
+      return
+    }
+    horizontalPageIndex.value = getPageIndexFromProgress(saved.progress || 0, pageCount)
+    store.setChapterScrollProgress(getPageProgress(horizontalPageIndex.value, pageCount))
+    updateHorizontalEndState()
+  },
+  { flush: 'sync' },
+)
+
 watch(() => store.currentIndex, async () => {
   loadSavedReadingPosition()
+  if (!pendingRestorePosition.value && !isContinuousMode.value) {
+    if (isHorizontalPageMode.value) {
+      resetHorizontalPagePosition()
+    } else {
+      scrollContainerRef.value?.scrollTo({ top: 0, behavior: 'auto' })
+    }
+  }
   resetAutoParagraphIndex()
   if (!store.isSpeaking) {
     clearReadingClass()
@@ -3054,916 +3228,4 @@ watch(
 )
 </script>
 
-<style scoped>
-.reader-view {
-  height: 100vh;
-  height: 100dvh;
-  height: var(--app-visual-height, var(--app-height, 100dvh));
-  width: 100%;
-  display: flex;
-  position: relative;
-  overflow: hidden;
-  transition: background 0.3s, color 0.3s;
-  padding-top: var(--safe-area-top);
-  padding-bottom: var(--safe-area-bottom);
-  box-sizing: border-box;
-}
-
-.reader-view.disable-system-callout .chapter-text,
-.reader-view.disable-system-callout .horizontal-page-content,
-.reader-view.disable-system-callout .continuous-reading {
-  -webkit-touch-callout: none;
-}
-
-.reader-scroll-container {
-  flex: 1;
-  height: 100%;
-  overflow-y: auto;
-  position: relative;
-  scroll-behavior: smooth;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.reader-scroll-container.horizontal-page-mode {
-  overflow-x: hidden;
-  overflow-y: hidden;
-  touch-action: pan-y pinch-zoom;
-  overscroll-behavior: none;
-}
-
-/* Hide scrollbar */
-.reader-scroll-container::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-}
-.reader-scroll-container::-webkit-scrollbar-thumb {
-  background: rgba(0,0,0,0.1);
-  border-radius: 4px;
-}
-.reader-view[style*="background: #1a1a2e"] .reader-scroll-container::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.1);
-}
-
-.content-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-}
-
-.offline-banner {
-  position: sticky;
-  top: 0;
-  z-index: 6;
-  margin: 0 auto;
-  width: min(100%, 880px);
-  padding: 10px 16px;
-  background: rgba(201, 127, 58, 0.12);
-  color: var(--color-primary);
-  border-bottom: 1px solid rgba(201, 127, 58, 0.18);
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: center;
-  backdrop-filter: blur(6px);
-}
-
-.loading-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid rgba(0,0,0,0.1);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-.reader-view[style*="background: #1a1a2e"] .loading-spinner {
-  border-color: rgba(255,255,255,0.1);
-  border-top-color: var(--color-primary);
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.chapter-content {
-  margin: 0 auto;
-  padding: 80px 24px;
-  min-height: 100%;
-  transition: all 0.3s ease;
-}
-
-.chapter-content.horizontal-page-article {
-  margin: 0;
-  height: 100%;
-  min-height: 100%;
-  width: max-content;
-  min-width: 100%;
-  padding: 0;
-}
-
-.horizontal-page-layout {
-  width: max-content;
-  min-width: var(--reader-page-step);
-  height: 100%;
-}
-
-.horizontal-content-page {
-  width: max-content;
-  min-width: var(--reader-page-step);
-  height: 100%;
-  min-height: 100%;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-.horizontal-pages {
-  display: flex;
-  width: max-content;
-  height: 100%;
-  min-height: 100%;
-  transform: translate3d(0, 0, 0);
-  transition-property: transform;
-  transition-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
-  will-change: transform;
-}
-
-.horizontal-page {
-  width: var(--reader-page-step);
-  min-width: var(--reader-page-step);
-  height: 100%;
-  min-height: 100%;
-  padding: 24px var(--reader-side-padding);
-  box-sizing: border-box;
-}
-
-.continuous-reading {
-  margin: 0 auto;
-  padding: 32px 0 80px;
-}
-
-.continuous-chapter {
-  min-height: auto;
-  padding-top: 48px;
-  padding-bottom: 24px;
-}
-
-.chapter-title {
-  font-size: 1.6em;
-  font-weight: 700;
-  margin-bottom: 2em;
-  text-align: center;
-  line-height: 1.4;
-}
-
-.chapter-summary-card {
-  margin: -8px 0 32px;
-  padding: 20px 22px;
-  border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-  border-radius: 18px;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-  transition: border-color 0.2s, background 0.2s;
-}
-
-.chapter-summary-card:hover {
-  border-color: var(--color-primary, #c97f3a);
-}
-
-.chapter-summary-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  border: 0;
-  padding: 0;
-  color: inherit;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-
-.chapter-summary-header > :first-child,
-.chapter-summary-sider-head > :first-child {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.summary-kicker {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--color-primary, #c97f3a);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-
-.summary-kicker::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 99px;
-  background: currentColor;
-  opacity: 0.75;
-}
-
-.summary-muted {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.62;
-  font-size: 0.92em;
-}
-
-.chapter-summary-body {
-  margin-top: 10px;
-  line-height: 1.75;
-}
-
-.summary-main {
-  margin: 0 0 12px;
-  max-width: 68ch;
-  font-weight: 400;
-  text-indent: 2em;
-  text-wrap: pretty;
-}
-
-.summary-main.summary-muted {
-  text-indent: 0;
-}
-
-.summary-list {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 16%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--color-primary, #c97f3a) 7%, transparent);
-  font-size: 0.88em;
-  line-height: 1.65;
-}
-
-.summary-list strong {
-  display: block;
-  margin-bottom: 6px;
-  color: inherit;
-  font-size: 0.9em;
-  font-weight: 600;
-  opacity: 0.72;
-  letter-spacing: 0;
-}
-
-.summary-list ul {
-  display: grid;
-  gap: 1px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.summary-list li {
-  position: relative;
-  padding: 1px 0 1px 18px;
-  text-wrap: pretty;
-}
-
-.summary-list li::before {
-  content: '';
-  position: absolute;
-  top: 0.95em;
-  left: 3px;
-  width: 4px;
-  height: 4px;
-  border-radius: 99px;
-  background: var(--color-primary, #c97f3a);
-}
-
-.summary-list.style-card ul {
-  display: grid;
-  gap: 1px;
-}
-
-.summary-list.style-card li {
-  padding: 1px 0 1px 18px;
-}
-
-.summary-list.style-card li::before {
-  display: block;
-}
-
-.summary-list.style-list {
-  padding: 12px 0 0;
-  border: 0;
-  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-  border-radius: 0;
-  background: transparent;
-}
-
-.summary-list.style-list li {
-  position: relative;
-  padding: 1px 0 1px 18px;
-}
-
-.summary-skeleton {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 18px;
-}
-
-.summary-skeleton span {
-  height: 12px;
-  border-radius: 99px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, currentColor 7%, transparent),
-    color-mix(in srgb, currentColor 13%, transparent),
-    color-mix(in srgb, currentColor 7%, transparent)
-  );
-}
-
-.summary-skeleton span:nth-child(2) {
-  width: 86%;
-}
-
-.summary-skeleton span:nth-child(3) {
-  width: 62%;
-}
-
-.summary-error {
-  margin: 12px 0 0;
-  color: #d25f4f;
-  font-size: 0.9em;
-}
-
-.summary-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.summary-actions.compact {
-  margin-top: 12px;
-}
-
-.summary-action {
-  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-  border-radius: 20px;
-  padding: 6px 14px;
-  color: inherit;
-  background: transparent;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  opacity: 0.78;
-  transition: border-color 0.2s, color 0.2s, background 0.2s, transform 0.18s;
-}
-
-.summary-action:hover:not(:disabled) {
-  border-color: var(--color-primary, #c97f3a);
-  color: var(--color-primary, #c97f3a);
-  background: transparent;
-  opacity: 1;
-  transform: translateY(-1px);
-}
-
-.summary-action:active:not(:disabled) {
-  transform: translateY(0);
-}
-
-.summary-action:focus-visible,
-.summary-panel-close:focus-visible,
-.chapter-summary-header:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-primary, #c97f3a) 70%, transparent);
-  outline-offset: 3px;
-}
-
-.summary-action:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.reader-ui-font,
-.reader-drawer,
-.reader-toolbar,
-.reader-mobile-controls,
-.reader-overlay,
-.chapter-summary-sider,
-.selection-menu,
-.summary-action,
-.summary-tabs,
-.summary-setting-group,
-.summary-setting-field,
-.summary-prompt-input {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-}
-
-
-.chapter-summary-card.side {
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.chapter-summary-sider {
-  position: relative;
-  flex: 0 0 auto;
-  height: auto;
-  overflow-y: auto;
-  margin: 16px 16px 16px 0;
-  border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-  border-radius: 24px;
-  box-shadow: -10px 10px 30px rgba(0, 0, 0, 0.08);
-  padding: 0 20px 24px;
-  box-sizing: border-box;
-  transition: background 0.3s, color 0.3s, box-shadow 0.2s;
-}
-
-.chapter-summary-sider.resizing {
-  user-select: none;
-}
-
-.chapter-summary-resize-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -4px;
-  width: 8px;
-  cursor: col-resize;
-}
-
-.chapter-summary-resize-handle::after {
-  content: '';
-  position: absolute;
-  top: 28px;
-  bottom: 28px;
-  left: 3px;
-  width: 2px;
-  border-radius: 99px;
-  background: color-mix(in srgb, currentColor 10%, transparent);
-}
-
-.chapter-summary-sider-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 0 -20px 10px;
-  padding: 14px 20px 10px;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-  font-size: 12px;
-}
-
-.chapter-summary-sider-head .summary-kicker {
-  font-size: 12px;
-}
-
-.chapter-summary-sider-head .summary-muted {
-  font-size: 11px;
-}
-
-.chapter-summary-card.side .chapter-summary-body {
-  margin-top: 0;
-}
-
-.chapter-summary-settings-panel {
-  display: grid;
-  gap: 12px;
-}
-
-.summary-tabs {
-  flex: 0 0 auto;
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  border-radius: 11px;
-  background: color-mix(in srgb, currentColor 4%, transparent);
-}
-
-.summary-tab {
-  border: 0;
-  border-radius: 8px;
-  padding: 5px 9px;
-  color: inherit;
-  background: transparent;
-  font-size: 12px;
-  opacity: 0.68;
-  cursor: pointer;
-}
-
-.summary-tab.active {
-  color: var(--color-primary, #c97f3a);
-  background: color-mix(in srgb, currentColor 4%, transparent);
-  opacity: 1;
-}
-
-.summary-setting-group {
-  display: grid;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid color-mix(in srgb, currentColor 9%, transparent);
-  border-radius: 16px;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-}
-
-.summary-setting-title {
-  color: var(--color-primary, #c97f3a);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.summary-setting-row,
-.summary-setting-field {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: inherit;
-  font-size: 12px;
-}
-
-.summary-setting-row > span,
-.summary-setting-field > span {
-  opacity: 0.72;
-}
-
-.summary-setting-field input,
-.summary-prompt-input {
-  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-  border-radius: 10px;
-  padding: 7px 9px;
-  color: inherit;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-}
-
-.summary-setting-field input {
-  width: 96px;
-  box-sizing: border-box;
-}
-
-.summary-prompt-input {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  line-height: 1.55;
-  font-size: 12px;
-}
-
-.summary-switch,
-.summary-stepper {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, currentColor 3%, transparent);
-}
-
-.summary-switch button,
-.summary-stepper button,
-.summary-stepper span {
-  border: 0;
-  border-radius: 7px;
-  padding: 5px 9px;
-  color: inherit;
-  background: transparent;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.16s, color 0.16s, opacity 0.16s;
-}
-
-.summary-switch button.active {
-  color: var(--color-primary, #c97f3a);
-  background: color-mix(in srgb, currentColor 5%, transparent);
-}
-
-.summary-switch button:disabled,
-.summary-stepper button:disabled {
-  cursor: default;
-  opacity: 0.42;
-}
-
-.summary-stepper span {
-  min-width: 40px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.summary-setting-note {
-  margin: 0;
-  color: inherit;
-  opacity: 0.62;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.summary-model-status {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-primary, #c97f3a) 8%, transparent);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.summary-model-status small {
-  opacity: 0.62;
-}
-
-.summary-model-details {
-  margin-top: 6px;
-}
-
-.summary-model-details summary {
-  cursor: pointer;
-  font-size: 13px;
-  opacity: 0.8;
-  padding: 4px 0;
-}
-
-.summary-model-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.summary-switch-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 4px 0;
-}
-
-.summary-switch-line input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--color-primary, #c97f3a);
-}
-
-.chapter-summary-collapsed-pill {
-  position: fixed;
-  right: 88px;
-  top: calc(var(--safe-area-top) + 84px);
-  z-index: 25;
-  border: 1px solid color-mix(in srgb, var(--color-primary, #c97f3a) 45%, transparent);
-  border-radius: 999px;
-  padding: 8px 14px;
-  color: var(--color-primary, #c97f3a);
-  background: color-mix(in srgb, var(--color-primary, #c97f3a) 8%, transparent);
-  backdrop-filter: blur(8px);
-  cursor: pointer;
-}
-
-.summary-panel-close {
-  flex: 0 0 auto;
-  border: 0;
-  color: inherit;
-  background: transparent;
-  opacity: 0.6;
-  cursor: pointer;
-}
-
-.chapter-text {
-  word-break: normal;
-  overflow-wrap: anywhere;
-  text-align: justify;
-  user-select: text;
-  -webkit-user-select: text;
-  -webkit-touch-callout: default;
-}
-
-.horizontal-page-content {
-  height: 100%;
-  overflow: hidden;
-  overflow-wrap: break-word;
-  text-align: left;
-  word-break: normal;
-}
-
-:deep(.horizontal-page-content .horizontal-flow-title) {
-  margin: 0 0 1em 0;
-  font-size: 1.5em;
-  line-height: 1.35;
-  font-weight: 700;
-  text-align: center;
-  break-inside: avoid;
-}
-
-:deep(.horizontal-page-content p:first-child) {
-  margin-top: 0 !important;
-}
-
-:deep(.horizontal-page-content p:last-child) {
-  margin-bottom: 0 !important;
-}
-
-:deep(.chapter-text p.reading) {
-  background: rgba(201, 127, 58, 0.12);
-  border-radius: 10px;
-  box-shadow: inset 0 0 0 1px rgba(201, 127, 58, 0.18);
-}
-
-:deep(.chapter-text p.reader-indent) {
-  text-indent: 2em !important;
-}
-
-:deep(.chapter-text p) {
-  text-indent: 0;
-  user-select: text;
-  -webkit-user-select: text;
-}
-
-.chapter-footer {
-  margin-top: 60px;
-  text-align: center;
-  padding-bottom: 40px;
-}
-
-.horizontal-next-floating {
-  position: absolute;
-  left: 50%;
-  bottom: calc(20px + var(--safe-area-bottom));
-  transform: translateX(-50%);
-  z-index: 12;
-  pointer-events: none;
-}
-
-.horizontal-next-floating .next-btn {
-  pointer-events: auto;
-  background: rgba(255, 255, 255, 0.75);
-  backdrop-filter: blur(6px);
-}
-
-.continuous-loading-inline {
-  text-align: center;
-  padding: 18px 24px;
-  opacity: 0.6;
-  font-size: 13px;
-}
-
-.next-btn {
-  padding: 12px 36px;
-  border-radius: 30px;
-  background: transparent;
-  border: 1px solid currentColor;
-  color: inherit;
-  font-size: 14px;
-  opacity: 0.6;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.next-btn:hover:not(:disabled) {
-  opacity: 1;
-  background: rgba(0,0,0,0.05);
-}
-
-.next-btn:disabled {
-  opacity: 0.2;
-  cursor: not-allowed;
-}
-
-
-
-/* Slide Drawer Overlay */
-.reader-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.4);
-  z-index: 40;
-}
-
-.reader-drawer {
-  position: fixed;
-  top: var(--safe-area-top);
-  bottom: var(--safe-area-bottom);
-  left: 0;
-  width: min(340px, 85vw);
-  z-index: 50;
-  box-shadow: 4px 0 24px rgba(0,0,0,0.15);
-  transition: background 0.3s;
-}
-
-.selection-menu {
-  position: fixed;
-  z-index: 60;
-  min-width: 220px;
-  max-width: min(320px, calc(100vw - 32px));
-  border-radius: 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  overflow: hidden;
-}
-
-.selection-menu-text {
-  padding: 12px 14px 8px;
-  font-size: 13px;
-  line-height: 1.5;
-  opacity: 0.72;
-  word-break: break-all;
-}
-
-.selection-menu-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding: 0 12px 12px;
-}
-
-.selection-menu-actions button {
-  border: none;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--color-primary);
-  color: #fff;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.selection-menu-actions button:first-child {
-  grid-column: 1 / -1;
-}
-
-:deep(.search-highlight) {
-  background: yellow;
-  color: black;
-  border-radius: 2px;
-}
-
-:deep(.search-highlight.current-match) {
-  background: orange;
-}
-
-@media (max-width: 768px) {
-  .reader-scroll-container.horizontal-page-mode {
-    scroll-behavior: auto;
-  }
-
-  .chapter-content {
-    padding: 24px 20px 8px;
-    min-height: auto;
-    height: auto;
-  }
-
-  .continuous-reading {
-    padding: 16px 0 8px;
-  }
-
-  .continuous-chapter {
-    padding-top: 20px;
-    padding-bottom: 8px;
-  }
-
-  .chapter-title {
-    margin-bottom: 0.9em;
-  }
-
-  .chapter-footer {
-    margin-top: 12px;
-    padding-bottom: 0;
-  }
-
-  .chapter-summary-sider,
-  .chapter-summary-collapsed-pill {
-    display: none;
-  }
-
-  .reader-drawer {
-    top: var(--safe-area-top);
-    bottom: var(--safe-area-bottom);
-    width: min(340px, 85vw);
-    padding-top: var(--safe-area-top);
-    padding-bottom: var(--safe-area-bottom);
-    box-sizing: border-box;
-  }
-}
-
-/* Transitions */
-.fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
-
-.slide-left-enter-active, .slide-left-leave-active { transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.slide-left-enter-from, .slide-left-leave-to { transform: translateX(-100%); }
-
-.fade-slide-right-enter-active, .fade-slide-right-leave-active { transition: all 0.3s ease; }
-.fade-slide-right-enter-from, .fade-slide-right-leave-to { transform: translateX(-20px); opacity: 0; }
-
-.fade-slide-left-enter-active, .fade-slide-left-leave-active { transition: all 0.3s ease; }
-.fade-slide-left-enter-from, .fade-slide-left-leave-to { transform: translateX(20px); opacity: 0; }
-</style>
+<style scoped src="../styles/reader-view.css"></style>
