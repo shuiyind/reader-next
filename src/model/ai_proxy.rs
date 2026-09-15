@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::time::Duration;
 use url::Url;
 
-const AI_PROXY_TIMEOUT_SECS: u64 = 300;
+const AI_PROXY_TIMEOUT_SECS: u64 = 600;
 const OPENAI_COMPATIBLE_SUFFIXES: [&str; 4] = [
     "/chat/completions",
     "/images/generations",
