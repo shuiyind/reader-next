@@ -5,9 +5,10 @@ import { getAiModelConfig } from '../api/ai/model'
 import {
   cancelAiBookCatchup,
   generateAiBookMap,
-  generateAiBookChapterMemory,
+  generateAiBookChapterMemoryAsync,
   getAiBookCatchupStatus,
   getAiBookChapterMemory,
+  getAiBookChapterMemoryGenerateStatus,
   getAiBookMemory,
   resetAiBookMemory,
   setAiBookEnabled,
@@ -30,7 +31,8 @@ vi.mock('../api/ai/book', () => ({
   getAiBookChapterMemory: vi.fn(),
   resetAiBookMemory: vi.fn(),
   setAiBookEnabled: vi.fn(),
-  generateAiBookChapterMemory: vi.fn(),
+  generateAiBookChapterMemoryAsync: vi.fn(),
+  getAiBookChapterMemoryGenerateStatus: vi.fn(),
   startAiBookCatchup: vi.fn(),
   getAiBookCatchupStatus: vi.fn(),
   cancelAiBookCatchup: vi.fn(),
@@ -42,7 +44,8 @@ const getAiBookMemoryMock = vi.mocked(getAiBookMemory)
 const getAiBookChapterMemoryMock = vi.mocked(getAiBookChapterMemory)
 const resetAiBookMemoryMock = vi.mocked(resetAiBookMemory)
 const setAiBookEnabledMock = vi.mocked(setAiBookEnabled)
-const generateAiBookChapterMemoryMock = vi.mocked(generateAiBookChapterMemory)
+const generateAiBookChapterMemoryAsyncMock = vi.mocked(generateAiBookChapterMemoryAsync)
+const getAiBookChapterMemoryGenerateStatusMock = vi.mocked(getAiBookChapterMemoryGenerateStatus)
 const startAiBookCatchupMock = vi.mocked(startAiBookCatchup)
 const getAiBookCatchupStatusMock = vi.mocked(getAiBookCatchupStatus)
 const cancelAiBookCatchupMock = vi.mocked(cancelAiBookCatchup)
@@ -57,7 +60,8 @@ describe('aiBook store v3', () => {
     getAiBookChapterMemoryMock.mockReset()
     resetAiBookMemoryMock.mockReset()
     setAiBookEnabledMock.mockReset()
-    generateAiBookChapterMemoryMock.mockReset()
+    generateAiBookChapterMemoryAsyncMock.mockReset()
+    getAiBookChapterMemoryGenerateStatusMock.mockReset()
     startAiBookCatchupMock.mockReset()
     getAiBookCatchupStatusMock.mockReset()
     cancelAiBookCatchupMock.mockReset()
@@ -88,7 +92,11 @@ describe('aiBook store v3', () => {
     }
     getAiBookMemoryMock.mockResolvedValue(memoryResponse)
     getAiBookChapterMemoryMock.mockResolvedValue(chapterResponse)
-    generateAiBookChapterMemoryMock.mockResolvedValue(generatedResponse)
+    generateAiBookChapterMemoryAsyncMock.mockResolvedValue({ status: 'running' })
+    getAiBookChapterMemoryGenerateStatusMock.mockResolvedValue({
+      status: 'completed',
+      result: generatedResponse,
+    })
     const store = useAiBookStore()
 
     const loaded = await store.load(book)
@@ -108,7 +116,7 @@ describe('aiBook store v3', () => {
     expect(store.chapterMemory).toEqual(generatedResponse.chapter)
     expect(getAiBookMemoryMock).toHaveBeenCalledWith(book.bookUrl)
     expect(getAiBookChapterMemoryMock).toHaveBeenCalledWith({ bookUrl: book.bookUrl, chapterIndex: 3 })
-    expect(generateAiBookChapterMemoryMock).toHaveBeenCalledWith({ bookUrl: book.bookUrl, chapterIndex: 3, mode: 'auto' })
+    expect(generateAiBookChapterMemoryAsyncMock).toHaveBeenCalledWith({ bookUrl: book.bookUrl, chapterIndex: 3, mode: 'auto' })
   })
 
   it('updates enabled reset and catchup state via v3 actions', async () => {
@@ -148,7 +156,11 @@ describe('aiBook store v3', () => {
     const book = createBook()
     const chapter = { index: 3, title: '第四章', url: 'chapter-3' }
     const generatedResponse = createChapterResponse(book)
-    generateAiBookChapterMemoryMock.mockResolvedValue(generatedResponse)
+    generateAiBookChapterMemoryAsyncMock.mockResolvedValue({ status: 'running' })
+    getAiBookChapterMemoryGenerateStatusMock.mockResolvedValue({
+      status: 'completed',
+      result: generatedResponse,
+    })
     const store = useAiBookStore()
 
     const result = await store.runChapterUpdate({
@@ -174,9 +186,13 @@ describe('aiBook store v3', () => {
     const book = createBook()
     const generatedResponse = createChapterResponse(book)
     const failure = new Error('生成失败')
-    generateAiBookChapterMemoryMock
+    generateAiBookChapterMemoryAsyncMock
       .mockRejectedValueOnce(failure)
-      .mockResolvedValueOnce(generatedResponse)
+      .mockResolvedValueOnce({ status: 'running' })
+    getAiBookChapterMemoryGenerateStatusMock.mockResolvedValue({
+      status: 'completed',
+      result: generatedResponse,
+    })
     const store = useAiBookStore()
 
     await expect(store.generateChapterMemory({ bookUrl: book.bookUrl, chapterIndex: 3, mode: 'manual' }))
@@ -191,7 +207,7 @@ describe('aiBook store v3', () => {
       .resolves
       .toEqual(generatedResponse.chapter)
 
-    expect(generateAiBookChapterMemoryMock).toHaveBeenCalledTimes(2)
+    expect(generateAiBookChapterMemoryAsyncMock).toHaveBeenCalledTimes(2)
     expect(store.phase).toBe('idle')
     expect(store.statusText).toBe('')
   })

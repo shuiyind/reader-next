@@ -1,5 +1,6 @@
 pub mod ai_book_catchup_service;
 pub mod ai_book_generation_service;
+pub mod ai_chapter_generate_task_service;
 pub mod ai_book_memory_v3;
 pub mod ai_book_service;
 pub mod ai_model_service;

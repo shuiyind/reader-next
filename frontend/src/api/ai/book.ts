@@ -26,6 +26,20 @@ export function generateAiBookChapterMemory(params: { bookUrl: string; chapterIn
   return http.post<AiBookChapterMemoryViewResponse>('/ai/book/chapter-memory/generate', params).then((r) => r.data)
 }
 
+export function generateAiBookChapterMemoryAsync(params: { bookUrl: string; chapterIndex: number; mode?: AiBookGenerationMode }) {
+  return http.post<ChapterGenerateTaskView>('/ai/book/chapter-memory/generate-async', params).then((r) => r.data)
+}
+
+export function getAiBookChapterMemoryGenerateStatus(params: { bookUrl: string; chapterIndex: number }) {
+  return http.get<ChapterGenerateTaskView>('/ai/book/chapter-memory/generate-status', { params }).then((r) => r.data)
+}
+
+export interface ChapterGenerateTaskView {
+  status: 'idle' | 'running' | 'completed' | 'failed'
+  error?: string | null
+  result?: AiBookChapterMemoryViewResponse | null
+}
+
 export function generateAiBookMap(params: { bookUrl: string; sourceChapterIndex?: number; prompt?: string }) {
   return http.post<AiBookMemoryViewResponse>('/ai/book/map/generate', params).then((r) => r.data)
 }

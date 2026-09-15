@@ -194,6 +194,71 @@ pub async fn generate_ai_book_chapter_memory(
     )))
 }
 
+pub async fn generate_ai_book_chapter_memory_async(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(req): Json<AiBookGenerateChapterRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let user_ns = resolve_user_ns(&state, &auth).await?;
+    let book_url = required_book_url(req.book_url)?;
+    let chapter_index = required_chapter_index(req.chapter_index)?;
+    let mode = parse_generation_mode(req.mode.as_deref());
+    let key = crate::service::ai_chapter_generate_task_service::chapter_generate_task_key(
+        &user_ns,
+        &book_url,
+        chapter_index,
+    );
+    let service = state.ai_chapter_generate_task_service.clone();
+    let task_state = state.clone();
+    let task_user_ns = user_ns.clone();
+    let task_book_url = book_url.clone();
+    let view = service
+        .start(
+            key,
+            move || async move {
+                let shelf_book = ensure_shelf_book(&task_state, &task_user_ns, &task_book_url)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let response = task_state
+                    .ai_book_generation_service
+                    .generate_current_chapter(
+                        &task_user_ns,
+                        &shelf_book,
+                        chapter_index,
+                        mode,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_value(response).map_err(|e| e.to_string())
+            },
+        )
+        .await;
+    Ok(Json(ApiResponse::ok(
+        serde_json::to_value(view).unwrap_or_default(),
+    )))
+}
+
+pub async fn get_ai_book_chapter_memory_generate_status(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(q): Query<AiBookGenerateChapterRequest>,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let user_ns = resolve_user_ns(&state, &auth).await?;
+    let book_url = required_book_url(q.book_url)?;
+    let chapter_index = required_chapter_index(q.chapter_index)?;
+    let key = crate::service::ai_chapter_generate_task_service::chapter_generate_task_key(
+        &user_ns,
+        &book_url,
+        chapter_index,
+    );
+    let view = state.ai_chapter_generate_task_service.get(&key).await;
+    let value = match view {
+        Some(view) => serde_json::to_value(view).unwrap_or_default(),
+        None => serde_json::json!({ "status": "idle" }),
+    };
+    Ok(Json(ApiResponse::ok(value)))
+}
+
 pub async fn generate_ai_book_map(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -883,6 +948,10 @@ mod tests {
             ai_book_service,
             ai_book_generation_service,
             ai_book_catchup_service,
+            ai_chapter_generate_task_service: std::sync::Arc::new(
+                crate::service::ai_chapter_generate_task_service::AiChapterGenerateTaskService::new(
+                ),
+            ),
             ai_model_service,
             chapter_summary_service,
             reader_background_service,

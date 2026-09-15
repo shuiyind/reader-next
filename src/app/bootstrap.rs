@@ -96,6 +96,9 @@ pub async fn run() -> anyhow::Result<()> {
         ai_book_service,
         ai_book_generation_service,
         ai_book_catchup_service,
+        ai_chapter_generate_task_service: std::sync::Arc::new(
+            crate::service::ai_chapter_generate_task_service::AiChapterGenerateTaskService::new(),
+        ),
         ai_model_service,
         chapter_summary_service,
         reader_background_service,

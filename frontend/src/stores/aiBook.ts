@@ -4,9 +4,10 @@ import { getAiModelConfig } from '../api/ai/model'
 import {
   cancelAiBookCatchup,
   generateAiBookMap,
-  generateAiBookChapterMemory,
+  generateAiBookChapterMemoryAsync,
   getAiBookCatchupStatus,
   getAiBookChapterMemory,
+  getAiBookChapterMemoryGenerateStatus,
   getAiBookMemory,
   resetAiBookMemory,
   setAiBookEnabled,
@@ -158,18 +159,41 @@ export const useAiBookStore = defineStore('aiBook', () => {
     }
   }
 
+  const CHAPTER_GENERATE_POLL_INTERVAL_MS = 2000
+  const CHAPTER_GENERATE_MAX_WAIT_MS = 15 * 60 * 1000
+
   async function generateChapterMemory(params: { bookUrl: string; chapterIndex: number; mode?: AiBookGenerationMode }) {
     phase.value = 'text'
     statusText.value = `生成第 ${params.chapterIndex + 1} 章 AI 资料...`
     try {
-      const response = await generateAiBookChapterMemory(params)
-      applyChapterResponse(response.memory, response.chapter)
-      phase.value = 'idle'
-      statusText.value = ''
-      return chapterMemory.value
+      // 后台任务 + 轮询：避免长时间同步请求被反向代理/CDN 超时切断（504）
+      await generateAiBookChapterMemoryAsync(params)
+      const startedAt = Date.now()
+      for (;;) {
+        const task = await getAiBookChapterMemoryGenerateStatus({
+          bookUrl: params.bookUrl,
+          chapterIndex: params.chapterIndex,
+        })
+        if (task.status === 'completed') {
+          const response = task.result
+          if (!response) throw new Error('生成结果缺失，请重试')
+          applyChapterResponse(response.memory, response.chapter)
+          return chapterMemory.value
+        }
+        if (task.status === 'failed') {
+          throw new Error(task.error || 'AI 资料更新失败')
+        }
+        if (Date.now() - startedAt > CHAPTER_GENERATE_MAX_WAIT_MS) {
+          throw new Error('生成超时，请稍后重试')
+        }
+        await new Promise((resolve) => setTimeout(resolve, CHAPTER_GENERATE_POLL_INTERVAL_MS))
+      }
     } catch (error) {
       setActionError((error as Error).message || 'AI 资料更新失败')
       throw error
+    } finally {
+      phase.value = 'idle'
+      statusText.value = ''
     }
   }
 

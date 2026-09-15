@@ -16,6 +16,8 @@ const AI_BOOK_CHAPTER_MEMORY_ROUTE: &str = "/reader3/ai/book/chapter-memory";
 const AI_BOOK_MEMORY_RESET_ROUTE: &str = "/reader3/ai/book/memory/reset";
 const AI_BOOK_ENABLED_ROUTE: &str = "/reader3/ai/book/enabled";
 const AI_BOOK_CHAPTER_GENERATE_ROUTE: &str = "/reader3/ai/book/chapter-memory/generate";
+const AI_BOOK_CHAPTER_GENERATE_ASYNC_ROUTE: &str = "/reader3/ai/book/chapter-memory/generate-async";
+const AI_BOOK_CHAPTER_GENERATE_STATUS_ROUTE: &str = "/reader3/ai/book/chapter-memory/generate-status";
 const AI_BOOK_MAP_GENERATE_ROUTE: &str = "/reader3/ai/book/map/generate";
 const AI_BOOK_CATCHUP_START_ROUTE: &str = "/reader3/ai/book/catchup/start";
 const AI_BOOK_CATCHUP_STATUS_ROUTE: &str = "/reader3/ai/book/catchup/status";
@@ -256,6 +258,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::generate_ai_book_map),
         )
         .route(
+            AI_BOOK_CHAPTER_GENERATE_ASYNC_ROUTE,
+            post(handlers::generate_ai_book_chapter_memory_async),
+        )
+        .route(
+            AI_BOOK_CHAPTER_GENERATE_STATUS_ROUTE,
+            get(handlers::get_ai_book_chapter_memory_generate_status),
+        )
+        .route(
             AI_BOOK_CATCHUP_START_ROUTE,
             post(handlers::start_ai_book_catchup),
         )
@@ -451,6 +461,9 @@ mod tests {
                 ai_model_service.clone(),
             ));
         let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
+        let ai_chapter_generate_task_service = Arc::new(
+            crate::service::ai_chapter_generate_task_service::AiChapterGenerateTaskService::new(),
+        );
         let chapter_summary_service =
             Arc::new(ChapterSummaryService::new(json_document_service.clone()));
         let reader_background_service = Arc::new(
@@ -480,6 +493,7 @@ mod tests {
             ai_book_service,
             ai_book_generation_service,
             ai_book_catchup_service,
+            ai_chapter_generate_task_service,
             ai_model_service,
             chapter_summary_service,
             reader_background_service,
