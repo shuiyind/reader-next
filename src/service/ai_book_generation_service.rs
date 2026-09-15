@@ -1314,7 +1314,7 @@ fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
             "temperature": 0.2,
             "max_output_tokens": 8192,
             "stream": false,
-            "text": { "format": { "type": "json_object" } },
+            "text": { "format": { "type": "json_schema", "name": "chapter_data", "schema": { "type": "object" } } },
             "input": [
                 { "role": "system", "content": DEFAULT_PROMPT },
                 { "role": "user", "content": prompt }

@@ -787,7 +787,7 @@ fn build_model_body(path: &str, model: &str, prompt: String) -> Value {
             "temperature": 0.2,
             "max_output_tokens": 8192,
             "stream": false,
-            "text": { "format": { "type": "json_object" } },
+            "text": { "format": { "type": "json_schema", "name": "chapter_data", "schema": { "type": "object" } } },
             "input": [
                 { "role": "system", "content": DEFAULT_PROMPT },
                 { "role": "user", "content": prompt }
@@ -2189,7 +2189,7 @@ mod tests {
         assert!(body.get("messages").is_none());
         assert_eq!(
             body.pointer("/text/format/type").and_then(Value::as_str),
-            Some("json_object")
+            Some("json_schema")
         );
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(false));
 
