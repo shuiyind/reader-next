@@ -209,8 +209,8 @@ export function loadReaderColorStyle(key: string, fallback: ReaderColorStyle): R
 /* ─── Font presets ─── */
 export const fontPresets = [
   { label: '系统', value: 'system', family: '' },
-  { label: '黑体', value: 'heiti', family: '"SimHei", "STHeiti", "Heiti SC", sans-serif' },
-  { label: '楷体', value: 'kaiti', family: '"KaiTi", "STKaiti", "BiauKai", serif' },
-  { label: '宋体', value: 'songti', family: '"SimSun", "STSong", "Songti SC", serif' },
-  { label: '仿宋', value: 'fangsong', family: '"FangSong", "STFangsong", serif' },
+  { label: '黑体', value: 'heiti', family: '"SimHei", "STHeiti", "Heiti SC", "Noto Sans SC", "Noto Sans CJK SC", sans-serif' },
+  { label: '楷体', value: 'kaiti', family: '"KaiTi", "STKaiti", "BiauKai", "Noto Serif SC", serif' },
+  { label: '宋体', value: 'songti', family: '"SimSun", "STSong", "Songti SC", "Source Han Serif SC", "Noto Serif SC", "Noto Serif CJK SC", serif' },
+  { label: '仿宋', value: 'fangsong', family: '"FangSong", "STFangsong", "Noto Serif SC", serif' },
 ]
