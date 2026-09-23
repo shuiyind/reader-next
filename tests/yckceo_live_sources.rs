@@ -1,4 +1,5 @@
 use reader_next::crawler::http_client::HttpClient;
+use reader_next::model::book::Book;
 use reader_next::model::book_source::{book_source_from_value, BookSource};
 use reader_next::parser::rule_engine::RuleEngine;
 use reader_next::service::book_service::BookService;
@@ -232,7 +233,7 @@ async fn smoke_source(
         .ok_or_else(|| "search returned no usable books".to_string())?;
 
     let info = service
-        .get_book_info("yckceo-live", source, &book.book_url)
+        .get_book_info_with_book("yckceo-live", source, &book)
         .await
         .map_err(|err| format!("book info failed for {}: {err:?}", book.book_url))?;
     let toc_url = info
@@ -240,8 +241,13 @@ async fn smoke_source(
         .clone()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| book.book_url.clone());
+    let toc_book = Book {
+        book_url: toc_url.clone(),
+        toc_url: Some(toc_url.clone()),
+        ..info.clone()
+    };
     let chapters = service
-        .get_chapter_list("yckceo-live", source, &toc_url)
+        .get_chapter_list_with_cache_for_book("yckceo-live", source, &toc_book, true)
         .await
         .map_err(|err| format!("toc failed for {toc_url}: {err:?}"))?;
     let chapter = chapters
@@ -251,7 +257,7 @@ async fn smoke_source(
         })
         .ok_or_else(|| "toc returned no readable chapter".to_string())?;
     let content = service
-        .get_content("yckceo-live", &book.book_url, source, &chapter.url)
+        .get_content_for_chapter("yckceo-live", source, &book, chapter, None)
         .await
         .map_err(|err| format!("content failed for {}: {err:?}", chapter.url))?;
     let content_chars = content.trim().chars().count();

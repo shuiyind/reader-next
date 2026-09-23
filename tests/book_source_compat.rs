@@ -2,6 +2,8 @@ use axum::{extract::State, http::HeaderMap, response::Html, routing::get, Router
 use reader_next::crawler::fetcher::HttpMethod;
 use reader_next::crawler::http_client::HttpClient;
 use reader_next::crawler::url_analyzer::analyze_url;
+use reader_next::model::book::Book;
+use reader_next::model::book_chapter::BookChapter;
 use reader_next::model::book_source::{book_source_from_value, BookSource};
 use reader_next::model::rule::{BookInfoRule, ContentRule, SearchRule, TocRule};
 use reader_next::parser::rule_engine::RuleEngine;
@@ -602,13 +604,16 @@ async fn content_pagination_stops_before_next_chapter_url() {
         ..Default::default()
     };
 
+    let book = Book {
+        book_url: format!("http://{}/books/1", addr),
+        ..Default::default()
+    };
+    let chapter = BookChapter {
+        url: format!("http://{}/chapters/1.html", addr),
+        ..Default::default()
+    };
     let content = service
-        .get_content(
-            "default",
-            &format!("http://{}/books/1", addr),
-            &source,
-            &format!("http://{}/chapters/1.html", addr),
-        )
+        .get_content_for_chapter("default", &source, &book, &chapter, None)
         .await
         .unwrap();
 
