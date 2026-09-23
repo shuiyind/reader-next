@@ -232,8 +232,12 @@ async fn smoke_source(
         .find(|book| !book.name.trim().is_empty() && !book.book_url.trim().is_empty())
         .ok_or_else(|| "search returned no usable books".to_string())?;
 
+    let seed_book = Book {
+        book_url: book.book_url.clone(),
+        ..Default::default()
+    };
     let info = service
-        .get_book_info_with_book("yckceo-live", source, &book)
+        .get_book_info_with_book("yckceo-live", source, &seed_book)
         .await
         .map_err(|err| format!("book info failed for {}: {err:?}", book.book_url))?;
     let toc_url = info
@@ -257,7 +261,7 @@ async fn smoke_source(
         })
         .ok_or_else(|| "toc returned no readable chapter".to_string())?;
     let content = service
-        .get_content_for_chapter("yckceo-live", source, &book, chapter, None)
+        .get_content_for_chapter("yckceo-live", source, &info, chapter, None)
         .await
         .map_err(|err| format!("content failed for {}: {err:?}", chapter.url))?;
     let content_chars = content.trim().chars().count();
