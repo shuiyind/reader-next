@@ -96,20 +96,23 @@ impl AiBookGenerationService {
         )
     }
 
+    /// 使用共享 AI 模型服务构造生成服务，内部持有共享 HTTP client 以复用连接池。
+    ///
+    /// HTTP client 初始化失败时返回错误而不是 panic。
     pub fn new_with_ai_model_service(
         ai_book_service: Arc<AiBookService>,
         book_service: Arc<BookService>,
         book_source_service: Arc<BookSourceService>,
         local_txt_book_service: Arc<LocalTxtBookService>,
         ai_model_service: Arc<AiModelService>,
-    ) -> Self {
-        Self::new_with_generator(
+    ) -> Result<Self, AppError> {
+        Ok(Self::new_with_generator(
             ai_book_service,
             book_service,
             book_source_service,
             local_txt_book_service,
-            Arc::new(ProxyChapterGenerationModel::new(ai_model_service)),
-        )
+            Arc::new(ProxyChapterGenerationModel::new(ai_model_service)?),
+        ))
     }
 
     pub fn new_with_generator(
@@ -892,15 +895,13 @@ struct ProxyChapterGenerationModel {
 }
 
 impl ProxyChapterGenerationModel {
-    fn new(ai_model_service: Arc<AiModelService>) -> Self {
-        let client = Client::builder()
-            .timeout(ai_proxy_timeout())
-            .build()
-            .expect("failed to build shared HTTP client");
-        Self {
+    /// 构造携带共享 HTTP client 的代理生成模型；client 构建失败时向上返回错误而不是 panic。
+    fn new(ai_model_service: Arc<AiModelService>) -> Result<Self, AppError> {
+        let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
+        Ok(Self {
             ai_model_service,
             client,
-        }
+        })
     }
 }
 
@@ -1171,6 +1172,7 @@ async fn resolve_image_endpoint(
     Ok(endpoint)
 }
 
+/// 调用图像生成模型并解码返回的图片数据。
 async fn call_image_generation_model(
     client: &Client,
     endpoint: &ResolvedAiModelEndpoint,
@@ -1245,6 +1247,7 @@ async fn call_image_generation_model(
     })
 }
 
+/// 调用文本生成模型并返回原始 JSON 响应值。
 async fn call_generation_model(
     client: &Client,
     endpoint: &ResolvedAiModelEndpoint,

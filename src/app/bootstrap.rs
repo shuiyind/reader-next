@@ -71,7 +71,7 @@ pub async fn run() -> anyhow::Result<()> {
         book_source_service.clone(),
         local_txt_book_service.clone(),
         ai_model_service.clone(),
-    ));
+    )?);
     let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
     let chapter_summary_service =
         Arc::new(ChapterSummaryService::new(json_document_service.clone()));

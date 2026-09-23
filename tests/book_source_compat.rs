@@ -554,24 +554,28 @@ async fn search_pipeline_uses_url_analyzer_final_url_and_login_check_js() {
     assert_eq!(books[0].book_url, format!("http://{}/book/1", addr));
 }
 
+/// 返回包含"下一页"链接的第一页正文。
 async fn content_page_one() -> Html<&'static str> {
     Html(
         r#"<html><body><div id="content">第一页正文</div><a class="next" href="/chapters/1-2.html">下一页</a></body></html>"#,
     )
 }
 
+/// 返回第二页正文。
 async fn content_page_two() -> Html<&'static str> {
     Html(
         r#"<html><body><div id="content">第二页正文</div><a class="next" href="/chapters/2.html">下一章</a></body></html>"#,
     )
 }
 
+/// 返回下一章正文并统计请求次数。
 async fn next_chapter_page(State(hits): State<Arc<AtomicUsize>>) -> Html<&'static str> {
     hits.fetch_add(1, Ordering::SeqCst);
     Html(r#"<html><body><div id="content">第二章正文</div></body></html>"#)
 }
 
 #[tokio::test]
+/// 验证正文按 nextContentUrl 分页且不会越过下一章链接抓取。
 async fn content_pagination_stops_before_next_chapter_url() {
     let next_chapter_hits = Arc::new(AtomicUsize::new(0));
     let app = Router::new()

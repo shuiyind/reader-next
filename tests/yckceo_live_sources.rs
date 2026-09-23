@@ -218,6 +218,7 @@ struct SmokePass {
     content_chars: usize,
 }
 
+/// 对单个书源执行搜索、详情、目录、正文的冒烟验证，返回统计结果。
 async fn smoke_source(
     service: &BookService,
     source: &BookSource,
@@ -246,7 +247,6 @@ async fn smoke_source(
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| book.book_url.clone());
     let toc_book = Book {
-        book_url: toc_url.clone(),
         toc_url: Some(toc_url.clone()),
         ..info.clone()
     };
