@@ -888,11 +888,19 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
 #[derive(Clone)]
 struct ProxyChapterGenerationModel {
     ai_model_service: Arc<AiModelService>,
+    client: Client,
 }
 
 impl ProxyChapterGenerationModel {
     fn new(ai_model_service: Arc<AiModelService>) -> Self {
-        Self { ai_model_service }
+        let client = Client::builder()
+            .timeout(ai_proxy_timeout())
+            .build()
+            .expect("failed to build shared HTTP client");
+        Self {
+            ai_model_service,
+            client,
+        }
     }
 }
 
@@ -903,12 +911,11 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
         memory: &'a AiBookMemoryV3,
         chapter: &'a LoadedChapter,
         mode: AiBookGenerationMode,
-    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>>
-    {
+    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>> {
         Box::pin(async move {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_combined_generation_prompt(chapter_text, memory, chapter, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             Ok(Some(deserialize_generation_value(value)?))
         })
     }
@@ -923,7 +930,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
         Box::pin(async move {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_digest_generation_prompt(chapter_text, memory, chapter, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             deserialize_digest_generation_value(value)
         })
     }
@@ -940,7 +947,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt =
                 build_patch_generation_prompt(chapter_text, memory, chapter, digest, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             deserialize_patch_generation_value(value)
         })
     }
@@ -951,7 +958,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
     ) -> futures::future::BoxFuture<'a, Result<GeneratedMapImage, AppError>> {
         Box::pin(async move {
             let endpoint = resolve_image_endpoint(self.ai_model_service.as_ref()).await?;
-            call_image_generation_model(&endpoint, prompt).await
+            call_image_generation_model(&self.client, &endpoint, prompt).await
         })
     }
 }
@@ -1165,6 +1172,7 @@ async fn resolve_image_endpoint(
 }
 
 async fn call_image_generation_model(
+    client: &Client,
     endpoint: &ResolvedAiModelEndpoint,
     prompt: &str,
 ) -> Result<GeneratedMapImage, AppError> {
@@ -1175,7 +1183,6 @@ async fn call_image_generation_model(
     };
     let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
         .map_err(AppError::BadRequest)?;
-    let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
     let mut body = serde_json::json!({
         "model": endpoint.model,
         "prompt": prompt,
@@ -1239,6 +1246,7 @@ async fn call_image_generation_model(
 }
 
 async fn call_generation_model(
+    client: &Client,
     endpoint: &ResolvedAiModelEndpoint,
     prompt: String,
 ) -> Result<Value, AppError> {
@@ -1251,7 +1259,6 @@ async fn call_generation_model(
         .map_err(AppError::BadRequest)?;
     let use_gemini_api_key_header = is_gemini_generate_content_path(path)
         && target.host_str() == Some("generativelanguage.googleapis.com");
-    let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
     let body = build_model_body(path, &endpoint.model, prompt);
     let mut builder = client
         .post(target)

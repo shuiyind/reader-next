@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use crate::util::time::now_ts;
 
 const FINISHED_TASK_RETENTION: Duration = Duration::from_secs(30 * 60);
+const RUNNING_TASK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Background single-chapter AI generation task.
 ///
@@ -61,7 +62,14 @@ impl AiChapterGenerateTaskService {
 
         let service = self.clone();
         tokio::spawn(async move {
-            let result = task().await;
+            let result = tokio::time::timeout(RUNNING_TASK_TIMEOUT, task()).await;
+            let result = match result {
+                Ok(inner) => inner,
+                Err(_) => Err(format!(
+                    "任务超时（{}秒），已自动终止",
+                    RUNNING_TASK_TIMEOUT.as_secs()
+                )),
+            };
             let mut tasks = service.tasks.write().await;
             if let Some(task) = tasks.get_mut(&key) {
                 match result {
@@ -87,9 +95,18 @@ impl AiChapterGenerateTaskService {
     }
 
     async fn cleanup_finished(&self) {
-        let cutoff = (now_ts() * 1000) - FINISHED_TASK_RETENTION.as_millis() as i64;
+        let now = now_ts() * 1000;
+        let finished_cutoff = now - FINISHED_TASK_RETENTION.as_millis() as i64;
+        let running_cutoff = now - RUNNING_TASK_TIMEOUT.as_millis() as i64;
         let mut tasks = self.tasks.write().await;
-        tasks.retain(|_, task| task.status == "running" || task.updated_at >= cutoff);
+        tasks.retain(|_, task| {
+            if task.status == "running" {
+                // 清理超过超时时间仍在 running 的卡死任务
+                task.updated_at >= running_cutoff
+            } else {
+                task.updated_at >= finished_cutoff
+            }
+        });
     }
 }
 
@@ -154,5 +171,47 @@ mod tests {
             })
             .await;
         assert_eq!(second.started_at, first.started_at);
+    }
+
+    #[tokio::test]
+    async fn stale_running_task_is_cleaned_up() {
+        let service = AiChapterGenerateTaskService::new();
+        {
+            let mut tasks = service.tasks.write().await;
+            let stale_time = (now_ts() * 1000) - (RUNNING_TASK_TIMEOUT.as_millis() as i64) - 1000;
+            tasks.insert(
+                "stale".to_string(),
+                ChapterGenerateTaskView {
+                    status: "running".to_string(),
+                    error: None,
+                    result: None,
+                    started_at: stale_time,
+                    updated_at: stale_time,
+                },
+            );
+        }
+        service.cleanup_finished().await;
+        assert!(service.get("stale").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn recent_running_task_is_not_cleaned_up() {
+        let service = AiChapterGenerateTaskService::new();
+        {
+            let mut tasks = service.tasks.write().await;
+            let now = now_ts() * 1000;
+            tasks.insert(
+                "active".to_string(),
+                ChapterGenerateTaskView {
+                    status: "running".to_string(),
+                    error: None,
+                    result: None,
+                    started_at: now,
+                    updated_at: now,
+                },
+            );
+        }
+        service.cleanup_finished().await;
+        assert!(service.get("active").await.is_some());
     }
 }
