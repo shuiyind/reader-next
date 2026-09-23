@@ -96,20 +96,23 @@ impl AiBookGenerationService {
         )
     }
 
+    /// 使用共享 AI 模型服务构造生成服务，内部持有共享 HTTP client 以复用连接池。
+    ///
+    /// HTTP client 初始化失败时返回错误而不是 panic。
     pub fn new_with_ai_model_service(
         ai_book_service: Arc<AiBookService>,
         book_service: Arc<BookService>,
         book_source_service: Arc<BookSourceService>,
         local_txt_book_service: Arc<LocalTxtBookService>,
         ai_model_service: Arc<AiModelService>,
-    ) -> Self {
-        Self::new_with_generator(
+    ) -> Result<Self, AppError> {
+        Ok(Self::new_with_generator(
             ai_book_service,
             book_service,
             book_source_service,
             local_txt_book_service,
-            Arc::new(ProxyChapterGenerationModel::new(ai_model_service)),
-        )
+            Arc::new(ProxyChapterGenerationModel::new(ai_model_service)?),
+        ))
     }
 
     pub fn new_with_generator(
@@ -888,11 +891,17 @@ impl ChapterGenerationModel for DisabledChapterGenerationModel {
 #[derive(Clone)]
 struct ProxyChapterGenerationModel {
     ai_model_service: Arc<AiModelService>,
+    client: Client,
 }
 
 impl ProxyChapterGenerationModel {
-    fn new(ai_model_service: Arc<AiModelService>) -> Self {
-        Self { ai_model_service }
+    /// 构造携带共享 HTTP client 的代理生成模型；client 构建失败时向上返回错误而不是 panic。
+    fn new(ai_model_service: Arc<AiModelService>) -> Result<Self, AppError> {
+        let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
+        Ok(Self {
+            ai_model_service,
+            client,
+        })
     }
 }
 
@@ -903,12 +912,11 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
         memory: &'a AiBookMemoryV3,
         chapter: &'a LoadedChapter,
         mode: AiBookGenerationMode,
-    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>>
-    {
+    ) -> futures::future::BoxFuture<'a, Result<Option<AiBookCombinedChapterGenerationV3>, AppError>> {
         Box::pin(async move {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_combined_generation_prompt(chapter_text, memory, chapter, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             Ok(Some(deserialize_generation_value(value)?))
         })
     }
@@ -923,7 +931,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
         Box::pin(async move {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt = build_digest_generation_prompt(chapter_text, memory, chapter, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             deserialize_digest_generation_value(value)
         })
     }
@@ -940,7 +948,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
             let endpoint = resolve_text_endpoint(self.ai_model_service.as_ref()).await?;
             let prompt =
                 build_patch_generation_prompt(chapter_text, memory, chapter, digest, mode)?;
-            let value = call_generation_model(&endpoint, prompt).await?;
+            let value = call_generation_model(&self.client, &endpoint, prompt).await?;
             deserialize_patch_generation_value(value)
         })
     }
@@ -951,7 +959,7 @@ impl ChapterGenerationModel for ProxyChapterGenerationModel {
     ) -> futures::future::BoxFuture<'a, Result<GeneratedMapImage, AppError>> {
         Box::pin(async move {
             let endpoint = resolve_image_endpoint(self.ai_model_service.as_ref()).await?;
-            call_image_generation_model(&endpoint, prompt).await
+            call_image_generation_model(&self.client, &endpoint, prompt).await
         })
     }
 }
@@ -1164,7 +1172,9 @@ async fn resolve_image_endpoint(
     Ok(endpoint)
 }
 
+/// 调用图像生成模型并解码返回的图片数据。
 async fn call_image_generation_model(
+    client: &Client,
     endpoint: &ResolvedAiModelEndpoint,
     prompt: &str,
 ) -> Result<GeneratedMapImage, AppError> {
@@ -1175,7 +1185,6 @@ async fn call_image_generation_model(
     };
     let target = build_ai_proxy_url(&endpoint.base_url, path, endpoint.use_full_url)
         .map_err(AppError::BadRequest)?;
-    let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
     let mut body = serde_json::json!({
         "model": endpoint.model,
         "prompt": prompt,
@@ -1238,7 +1247,9 @@ async fn call_image_generation_model(
     })
 }
 
+/// 调用文本生成模型并返回原始 JSON 响应值。
 async fn call_generation_model(
+    client: &Client,
     endpoint: &ResolvedAiModelEndpoint,
     prompt: String,
 ) -> Result<Value, AppError> {
@@ -1251,7 +1262,6 @@ async fn call_generation_model(
         .map_err(AppError::BadRequest)?;
     let use_gemini_api_key_header = is_gemini_generate_content_path(path)
         && target.host_str() == Some("generativelanguage.googleapis.com");
-    let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
     let body = build_model_body(path, &endpoint.model, prompt);
     let mut builder = client
         .post(target)

@@ -1,12 +1,13 @@
 use axum::{http::HeaderMap, response::Json, routing::get, Router};
 use reader_next::crawler::http_client::HttpClient;
-use reader_next::model::{book_source::BookSource, rule::TocRule};
+use reader_next::model::{book::Book, book_source::BookSource, rule::TocRule};
 use reader_next::parser::rule_engine::RuleEngine;
 use reader_next::service::book_service::BookService;
 use reader_next::storage::cache::file_cache::FileCache;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+/// 返回受自定义 header 保护的模拟目录接口。
 async fn protected_toc(headers: HeaderMap) -> Json<Value> {
     let has_source_token = headers
         .get("x-source-token")
@@ -36,6 +37,7 @@ async fn protected_toc(headers: HeaderMap) -> Json<Value> {
 }
 
 #[tokio::test]
+/// 验证目录请求会携带书源的自定义 header。
 async fn chapter_list_requests_include_legacy_source_headers() {
     let app = Router::new().route("/toc", get(protected_toc));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -67,8 +69,14 @@ async fn chapter_list_requests_include_legacy_source_headers() {
         ..Default::default()
     };
 
+    let toc_url = format!("http://{}/toc", addr);
+    let book = Book {
+        book_url: toc_url.clone(),
+        toc_url: Some(toc_url.clone()),
+        ..Default::default()
+    };
     let chapters = service
-        .get_chapter_list_with_cache("default", &source, &format!("http://{}/toc", addr), true)
+        .get_chapter_list_with_cache_for_book("default", &source, &book, true)
         .await
         .unwrap();
 

@@ -417,6 +417,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    /// 构造集成测试用的 AppState 与临时存储目录。
     async fn create_test_state() -> (AppState, PathBuf) {
         let dir = std::env::temp_dir().join(format!("reader-ai-book-router-{}", random_string(8)));
         std::fs::create_dir_all(&dir).unwrap();
@@ -459,7 +460,7 @@ mod tests {
                 book_source_service.clone(),
                 local_txt_book_service.clone(),
                 ai_model_service.clone(),
-            ));
+            ).expect("failed to build shared AI generation client"));
         let ai_book_catchup_service = Arc::new(AiBookCatchupService::new());
         let ai_chapter_generate_task_service = Arc::new(
             crate::service::ai_chapter_generate_task_service::AiChapterGenerateTaskService::new(),
@@ -664,3 +665,4 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }
+

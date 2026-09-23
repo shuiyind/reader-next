@@ -1,0 +1,52 @@
+name: "CI"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "fix/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: "cargo check and test"
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: "never"
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Setup Rust"
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: "Cache cargo"
+        uses: Swatinem/rust-cache@v2
+
+      - name: "cargo check"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --all-targets --keep-going --message-format short 2>&1 | tee check.log
+
+      - name: "cargo test"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --lib 2>&1 | tee test.log
+
+      - name: "Report errors to annotations"
+        if: failure()
+        shell: bash
+        run: |
+          for f in check.log test.log; do
+            if [ -f "$f" ]; then
+              echo "::notice::last 8 lines of $f"
+              tail -8 "$f" | sed 's/^/::error::tail: /'
+              grep -E "(^|[^A-Za-z_])error(\[E[0-9]+\])?:" "$f" | head -20 | sed 's/^/::error::detail: /'
+            fi
+          done
+
