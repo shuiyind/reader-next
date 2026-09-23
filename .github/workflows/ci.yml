@@ -25,7 +25,23 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: "cargo check"
-        run: "cargo check --all-targets"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --all-targets --message-format short 2>&1 | tee check.log
 
       - name: "cargo test"
-        run: "cargo test --lib"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --lib 2>&1 | tee test.log
+
+      - name: "Report errors to annotations"
+        if: failure()
+        shell: bash
+        run: |
+          for f in check.log test.log; do
+            if [ -f "$f" ]; then
+              grep -E "error" "$f" | head -60 | sed 's/^/::error::/' 
+            fi
+          done
