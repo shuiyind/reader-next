@@ -1,33 +1,31 @@
-name: CI
+name: "CI"
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'fix/**']
+    branches: ["main", "fix/**"]
   pull_request:
-    branches: [main]
+    branches: ["main"]
 
 permissions:
   contents: read
 
 jobs:
   ci:
-    name: cargo check & test
+    name: "cargo check and test"
     runs-on: ubuntu-latest
-    env:
-      DATABASE_URL: sqlite::memory:
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Setup Rust
+      - name: "Setup Rust"
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
+      - name: "Cache cargo"
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo check
-        run: cargo check --all-targets
+      - name: "cargo check"
+        run: "cargo check --all-targets"
 
-      - name: cargo test
-        run: cargo test --lib
+      - name: "cargo test"
+        run: "cargo test --lib"
