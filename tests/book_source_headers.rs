@@ -1,6 +1,6 @@
 use axum::{http::HeaderMap, response::Json, routing::get, Router};
 use reader_next::crawler::http_client::HttpClient;
-use reader_next::model::{book_source::BookSource, rule::TocRule};
+use reader_next::model::{book::Book, book_source::BookSource, rule::TocRule};
 use reader_next::parser::rule_engine::RuleEngine;
 use reader_next::service::book_service::BookService;
 use reader_next::storage::cache::file_cache::FileCache;
@@ -67,8 +67,14 @@ async fn chapter_list_requests_include_legacy_source_headers() {
         ..Default::default()
     };
 
+    let toc_url = format!("http://{}/toc", addr);
+    let book = Book {
+        book_url: toc_url.clone(),
+        toc_url: Some(toc_url.clone()),
+        ..Default::default()
+    };
     let chapters = service
-        .get_chapter_list_with_cache("default", &source, &format!("http://{}/toc", addr), true)
+        .get_chapter_list_with_cache_for_book("default", &source, &book, true)
         .await
         .unwrap();
 
