@@ -9,7 +9,7 @@
 ## 克隆项目
 
 ```bash
-git clone https://github.com/Maple0517/reader-next.git
+git clone https://github.com/HoshimiyaYoku/reader-next.git
 cd reader-next
 ```
 
