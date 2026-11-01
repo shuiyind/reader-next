@@ -12,7 +12,7 @@ describe('ReaderView summary management UI', () => {
  expect(source).toContain('chapterSummaryConfigDraft')
  expect(source).toContain('saveChapterSummaryGenerationSettings')
   expect(source).toContain('Number.isFinite')
- expect(source).toContain('打开 AI 后端设置')
+ expect(source).toContain('保存后端模型')
  })
 
  it('does not keep the old inline collapse interaction', () => {
