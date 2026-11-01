@@ -6,7 +6,7 @@
           <h2>地图</h2>
           <p>{{ statusCopy }}</p>
         </div>
-        <button class="secondary-btn" :disabled="busy" type="button" @click="$emit('generate')">
+        <button class="secondary-btn" :disabled="busy || (!locations.length && !map?.blueprint && !map?.artifacts?.imageUrl)" type="button" @click="$emit('generate')">
           {{ map?.artifacts?.imageUrl ? '重新生成' : '生成地图' }}
         </button>
       </div>

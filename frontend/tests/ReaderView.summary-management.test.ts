@@ -5,7 +5,9 @@ import { resolve } from 'node:path'
 const source = readFileSync(resolve(process.cwd(), 'src/views/ReaderView.vue'), 'utf8')
 describe('ReaderView summary management UI', () => {
  it('owns the summary management tabs and prompt editor', () => {
-  expect(source).toContain("'content'")
+  expect(source).toContain('summary')
+  expect(source).toContain('relationships')
+  expect(source).toContain('map')
   expect(source).toContain("'settings'")
  expect(source).toContain('chapterSummaryConfigDraft')
  expect(source).toContain('saveChapterSummaryGenerationSettings')
