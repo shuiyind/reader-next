@@ -429,16 +429,16 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         }
                     }
                     "title" if in_metadata => {
-                        title = opf_reader
-                            .read_text(e.name())
-                            .unwrap_or_default()
-                            .to_string();
+                        title = match opf_reader.read_text(e.name()) {
+                            Ok(text) => text.as_ref().trim().to_string(),
+                            Err(_) => String::new(),
+                        };
                     }
                     "creator" if in_metadata => {
-                        author = opf_reader
-                            .read_text(e.name())
-                            .unwrap_or_default()
-                            .to_string();
+                        author = match opf_reader.read_text(e.name()) {
+                            Ok(text) => text.as_ref().trim().to_string(),
+                            Err(_) => String::new(),
+                        };
                     }
                     "meta" if in_metadata => {
                         let mut name = String::new();
@@ -534,7 +534,10 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if local_name(e.name()) == "title" => {
-                let text = reader.read_text(e.name()).ok()?;
+                let text = match reader.read_text(e.name()) {
+                    Ok(text) => text.as_ref().trim().to_string(),
+                    Err(_) => return None,
+                };
                 let text = text.trim().to_string();
                 if !text.is_empty() {
                     return Some(text);
@@ -556,7 +559,10 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
                     && ln.as_bytes()[1] >= b'1'
                     && ln.as_bytes()[1] <= b'6'
                 {
-                    let text = reader.read_text(e.name()).ok()?;
+                    let text = match reader.read_text(e.name()) {
+                    Ok(text) => text.as_ref().trim().to_string(),
+                    Err(_) => return None,
+                };
                     let text = text.trim().to_string();
                     if !text.is_empty() {
                         return Some(text);
@@ -591,7 +597,7 @@ fn strip_html_tags(html: &str) -> String {
                 }
             }
             Ok(Event::Text(ref e)) if !skip => {
-                let text = e.unescape().unwrap_or_default().to_string();
+                let text = quick_xml::escape::unescape(e.as_ref()).unwrap_or_default().to_string();
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     result.push_str(trimmed);
