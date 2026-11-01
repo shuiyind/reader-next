@@ -20,16 +20,15 @@ describe('ReaderView summary management UI', () => {
  })
 
  it('keeps an entry point when side placement collapses', () => {
-  expect(source).toContain('showCollapsedChapterSummary')
+  expect(source).toContain('showCollapsedAiPanel')
   expect(source).toContain('chapter-summary-collapsed-pill')
-  expect(source).toContain('@click="expandCollapsedChapterSummary"')
+  expect(source).toContain('@click="expandCollapsedAiPanel"')
  })
 
-
- it('hides summary through a helper that clears pending generation', () => {
-  expect(source).toContain('function hideChapterSummary()')
+ it('hides the AI panel through a helper that clears pending generation', () => {
+  expect(source).toContain('function hideAiPanel()')
   expect(source).toContain('clearChapterSummaryTimer()')
   expect(source).not.toContain('@click="showChapterSummary = false"')
-  expect(source).toContain('if (!showChapterSummary.value) return')
+  expect(source).toContain('function toggleAiPanel()')
  })
 })
