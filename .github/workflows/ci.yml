@@ -90,16 +90,6 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: "Audit Rust dependencies"
         run: cargo audit
-      - name: "Update npm lockfile for audit"
-        working-directory: frontend
-        run: npm ci --ignore-scripts && npm install --ignore-scripts --save axios@latest vue@latest
-      - name: "Upload updated npm lockfile"
-        uses: actions/upload-artifact@v4
-        with:
-          name: npm-lockfile-${{ github.sha }}
-          path: |
-            frontend/package.json
-            frontend/package-lock.json
       - name: "Audit npm dependencies"
         working-directory: frontend
         run: npm audit --package-lock-only --omit=dev --audit-level=high
