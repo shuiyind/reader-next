@@ -2,7 +2,6 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use reqwest::Client;
 use serde_json::Value;
 
 use crate::api::{auth::AuthContext, AppState};
@@ -47,7 +46,7 @@ pub async fn generate_chapter_summary(
         ));
     }
     let ai_config = state.ai_model_service.get().await?;
-    let client = Client::builder()
+    let client = crate::util::net::no_redirect_client_builder()
         .timeout(std::time::Duration::from_secs(
             state.config.request_timeout_secs.max(15),
         ))

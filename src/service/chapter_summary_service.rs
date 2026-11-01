@@ -153,7 +153,7 @@ impl ChapterSummaryService {
         let body =
             build_summary_model_body(path, &endpoint.model, &config, &req, &previous_context);
 
-        let model_client = Client::builder().timeout(ai_proxy_timeout()).build()?;
+        let model_client = crate::util::net::no_redirect_client_builder().timeout(ai_proxy_timeout()).build()?;
         let mut builder = model_client
             .post(target)
             .header(reqwest::header::ACCEPT, "application/json")

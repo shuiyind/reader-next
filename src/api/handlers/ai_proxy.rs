@@ -7,9 +7,6 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
-use tokio::net::lookup_host;
 use url::Url;
 
 use crate::api::{auth::AuthContext, AppState};
@@ -952,7 +949,7 @@ fn build_upstream_error_response(status: reqwest::StatusCode, body: &bytes::Byte
 }
 
 fn ai_proxy_client() -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
+    crate::util::net::no_redirect_client_builder()
         .timeout(ai_proxy_timeout())
         .build()
         .map_err(AppError::Http)
@@ -960,40 +957,9 @@ fn ai_proxy_client() -> Result<reqwest::Client, AppError> {
 
 async fn public_https_speech_proxy_client(target: &Url) -> Result<reqwest::Client, AppError> {
     validate_public_https_speech_target(target).map_err(AppError::BadRequest)?;
-    let host = target
-        .host_str()
-        .ok_or_else(|| AppError::BadRequest("HTTPS TTS 地址缺少主机名".to_string()))?;
-    let port = target.port_or_known_default().unwrap_or(443);
-    let resolved_address = if let Ok(ip) = host.parse::<IpAddr>() {
-        SocketAddr::new(ip, port)
-    } else {
-        let addresses = tokio::time::timeout(Duration::from_secs(10), lookup_host((host, port)))
-            .await
-            .map_err(|_| AppError::BadRequest("HTTPS TTS 地址解析超时".to_string()))?
-            .map_err(|_| AppError::BadRequest("HTTPS TTS 地址无法解析".to_string()))?;
-        addresses
-            .filter(|address| is_public_proxy_ip(address.ip()))
-            .min_by_key(|address| if address.is_ipv4() { 0 } else { 1 })
-            .ok_or_else(|| {
-                AppError::BadRequest("HTTPS TTS 地址不能指向本机或私有网络".to_string())
-            })?
-    };
-
-    if !is_public_proxy_ip(resolved_address.ip()) {
-        return Err(AppError::BadRequest(
-            "HTTPS TTS 地址不能指向本机或私有网络".to_string(),
-        ));
-    }
-
-    let mut builder = reqwest::Client::builder()
-        .timeout(ai_proxy_timeout())
-        .redirect(reqwest::redirect::Policy::none());
-    if host.parse::<IpAddr>().is_err() {
-        // Pin the already-validated address to avoid DNS rebinding between
-        // validation and connection while preserving the hostname for TLS/SNI.
-        builder = builder.resolve(host, resolved_address);
-    }
-    builder.build().map_err(AppError::Http)
+    crate::util::net::public_client(target, ai_proxy_timeout())
+        .await
+        .map_err(AppError::BadRequest)
 }
 
 fn validate_public_https_speech_target(target: &Url) -> Result<(), String> {
@@ -1011,58 +977,8 @@ fn validate_public_https_speech_target(target: &Url) -> Result<(), String> {
     {
         return Err("HTTPS TTS 地址必须以 /audio/speech 结尾".to_string());
     }
-    let host = target
-        .host_str()
-        .ok_or_else(|| "HTTPS TTS 地址缺少主机名".to_string())?;
-    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
-    if normalized_host == "localhost"
-        || normalized_host.ends_with(".localhost")
-        || normalized_host.ends_with(".local")
-        || normalized_host.ends_with(".internal")
-    {
-        return Err("HTTPS TTS 地址不能指向本机或私有网络".to_string());
-    }
-    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
-        if !is_public_proxy_ip(ip) {
-            return Err("HTTPS TTS 地址不能指向本机或私有网络".to_string());
-        }
-    }
+    crate::util::net::parse_public_http_url(target.as_str())?;
     Ok(())
-}
-
-fn is_public_proxy_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            let [first, second, third, _] = ip.octets();
-            !ip.is_private()
-                && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && !ip.is_broadcast()
-                && first != 0
-                && first < 224
-                && !(first == 100 && (64..=127).contains(&second))
-                && !(first == 192 && second == 0)
-                && !(first == 198 && (18..=19).contains(&second))
-                && !(first == 198 && second == 51 && third == 100)
-                && !(first == 203 && second == 0 && third == 113)
-        }
-        IpAddr::V6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                return is_public_proxy_ip(IpAddr::V4(mapped));
-            }
-            let segments = ip.segments();
-            !ip.is_loopback()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && !ip.is_unique_local()
-                && !ip.is_unicast_link_local()
-                && !segments[..6].iter().all(|segment| *segment == 0)
-                && (segments[0] & 0xffc0) != 0xfec0
-                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
-        }
-    }
 }
 
 fn map_ai_proxy_http_error(error: reqwest::Error) -> AppError {
@@ -1456,10 +1372,10 @@ mod tests {
             "fe80::1",
             "::ffff:127.0.0.1",
         ] {
-            assert!(!is_public_proxy_ip(address.parse().unwrap()), "{address}");
+            assert!(!crate::util::net::is_public_ip(address.parse().unwrap()), "{address}");
         }
-        assert!(is_public_proxy_ip("8.8.8.8".parse().unwrap()));
-        assert!(is_public_proxy_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(crate::util::net::is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(crate::util::net::is_public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 
     #[test]

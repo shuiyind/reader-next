@@ -1,4 +1,6 @@
 use reqwest::{redirect::Policy, Client};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use std::sync::Arc;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
@@ -59,12 +61,52 @@ pub async fn resolve_public_target(url: &Url) -> Result<SocketAddr, String> {
         .ok_or_else(|| "目标不能指向本机或私有网络".to_string())
 }
 
+#[derive(Clone)]
+struct PublicDnsResolver;
+
+impl Resolve for PublicDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addresses = tokio::time::timeout(
+                Duration::from_secs(10),
+                lookup_host((host.as_str(), 0)),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "目标 DNS 解析超时")
+            })?
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+
+            let addresses = addresses
+                .map(|address| SocketAddr::new(address.ip(), 0))
+                .filter(|address| is_public_ip(address.ip()))
+                .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "目标不能指向本机或私有网络",
+                )
+                .into());
+            }
+            Ok(Box::new(addresses.into_iter()) as Addrs)
+        })
+    }
+}
+
+pub fn no_redirect_client_builder() -> reqwest::ClientBuilder {
+    Client::builder().redirect(Policy::none())
+}
+
+pub fn public_client_builder() -> reqwest::ClientBuilder {
+    no_redirect_client_builder().dns_resolver(Arc::new(PublicDnsResolver))
+}
+
 pub async fn public_client(url: &Url, timeout: Duration) -> Result<Client, String> {
     let address = resolve_public_target(url).await?;
     let host = url.host_str().ok_or("URL 缺少主机名")?;
-    let mut builder = Client::builder()
+    let mut builder = public_client_builder()
         .timeout(timeout)
-        .redirect(Policy::none())
         .user_agent("reader-next/secure-fetch");
     if parse_ip_host(host).is_none() {
         builder = builder.resolve(host, address);
@@ -176,10 +218,23 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 
     let segments = ip.segments();
     let unique_local = segments[0] & 0xfe00 == 0xfc00;
+    let site_local = segments[0] & 0xffc0 == 0xfec0;
     let link_local = segments[0] & 0xffc0 == 0xfe80;
     let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
-    let discard = segments[0] == 0x0100 && segments[1..5] == [0, 0, 0, 0];
-    !(unique_local || link_local || documentation || discard)
+    let discard = segments[0] == 0x0100 && segments[1..4] == [0, 0, 0];
+    let nat64 = segments[0] == 0x0064 && segments[1] == 0xff9b;
+    let six_to_four = segments[0] == 0x2002;
+    let teredo = segments[0] == 0x2001 && segments[1] == 0;
+    let isatap = segments[4] == 0 && segments[5] == 0x5efe;
+    !(unique_local
+        || site_local
+        || link_local
+        || documentation
+        || discard
+        || nat64
+        || six_to_four
+        || teredo
+        || isatap)
 }
 
 #[cfg(test)]
@@ -195,6 +250,9 @@ mod tests {
             "http://[::1]/admin",
             "http://localhost/admin",
             "http://metadata.google.internal/computeMetadata/v1/",
+            "http://[64:ff9b::7f00:1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[100::1]/",
         ] {
             assert!(parse_public_http_url(target).is_err(), "{target}");
         }
