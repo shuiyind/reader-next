@@ -378,15 +378,16 @@ fn extract_pdf_page_text_lossy(doc: &Document, page_num: u32) -> Result<(String,
             }
             "Tj" | "TJ" => {
                 if let Some(encoding) = current_encoding {
-                    if let Err(err) =
-                        collect_pdf_operation_text(&mut text, encoding, &operation.operands)
-                    {
-                        had_lossy_decode = true;
-                        tracing::warn!(
-                            page = page_num,
-                            error = %err,
-                            "skip undecodable PDF text operation"
-                        );
+                    match collect_pdf_operation_text(&mut text, encoding, &operation.operands) {
+                        Ok(lossy) => had_lossy_decode |= lossy,
+                        Err(err) => {
+                            had_lossy_decode = true;
+                            tracing::warn!(
+                                page = page_num,
+                                error = %err,
+                                "skip undecodable PDF text operation"
+                            );
+                        }
                     }
                 }
             }
@@ -406,21 +407,27 @@ fn collect_pdf_operation_text(
     text: &mut String,
     encoding: &Encoding<'_>,
     operands: &[Object],
-) -> lopdf::Result<()> {
+) -> lopdf::Result<bool> {
+    let mut had_lossy_decode = false;
     for operand in operands {
         match operand {
             Object::String(bytes, _) => {
-                text.push_str(&Document::decode_text(encoding, bytes)?);
+                let decoded = Document::decode_text(encoding, bytes)?;
+                if decoded == "_" && bytes.len() > 1 {
+                    had_lossy_decode = true;
+                } else {
+                    text.push_str(&decoded);
+                }
             }
             Object::Array(arr) => {
-                collect_pdf_operation_text(text, encoding, arr)?;
+                had_lossy_decode |= collect_pdf_operation_text(text, encoding, arr)?;
                 text.push(' ');
             }
             Object::Integer(i) if *i < -100 => text.push(' '),
             _ => {}
         }
     }
-    Ok(())
+    Ok(had_lossy_decode)
 }
 
 fn pdf_hash_from_url(book_url: &str) -> Result<&str, AppError> {
