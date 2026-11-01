@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-DOCKER_REPO="${DOCKER_REPO:-ghcr.io/hoshimiyayoku/reader-next}"
+DOCKER_REPO="${DOCKER_REPO:-ghcr.io/shuiyind/reader-next}"
 BUMP_MODE="patch"
 INPUT_VERSION=""
 
@@ -16,8 +16,8 @@ Usage:
 Behavior:
   - If version is provided: release that exact version.
   - If version is omitted: auto-bump latest git tag with patch (+1).
-  - Docker image is published by .github/workflows/docker-publish.yml after the tag is pushed.
-  - Default Docker repo: ghcr.io/maple0517/reader-next
+  - Docker image is published by .github/workflows/docker-publish-user.yml after the tag is pushed.
+  - Default Docker repo: ghcr.io/shuiyind/reader-next
 USAGE
 }
 
