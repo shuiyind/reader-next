@@ -46,7 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 sxd-xpath = "0.4"
 sxd-document = "0.3"
-quick-xml = "0.41"
+quick-xml = "0.42"
 zip = { version = "9.0", default-features = false, features = ["deflate"] }
 lopdf = "0.42"
 mobi = "0.8"

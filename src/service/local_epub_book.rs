@@ -430,13 +430,13 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                     }
                     "title" if in_metadata => {
                         title = match opf_reader.read_text(e.name()) {
-                            Ok(text) => text.as_ref().trim().to_string(),
+                            Ok(text) => (&*text).trim().to_string(),
                             Err(_) => String::new(),
                         };
                     }
                     "creator" if in_metadata => {
                         author = match opf_reader.read_text(e.name()) {
-                            Ok(text) => text.as_ref().trim().to_string(),
+                            Ok(text) => (&*text).trim().to_string(),
                             Err(_) => String::new(),
                         };
                     }
@@ -535,7 +535,7 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if local_name(e.name()) == "title" => {
                 let text = match reader.read_text(e.name()) {
-                    Ok(text) => text.as_ref().trim().to_string(),
+                    Ok(text) => (&*text).trim().to_string(),
                     Err(_) => return None,
                 };
                 let text = text.trim().to_string();
@@ -560,7 +560,7 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
                     && ln.as_bytes()[1] <= b'6'
                 {
                     let text = match reader.read_text(e.name()) {
-                    Ok(text) => text.as_ref().trim().to_string(),
+                    Ok(text) => (&*text).trim().to_string(),
                     Err(_) => return None,
                 };
                     let text = text.trim().to_string();
@@ -597,7 +597,7 @@ fn strip_html_tags(html: &str) -> String {
                 }
             }
             Ok(Event::Text(ref e)) if !skip => {
-                let text = quick_xml::escape::unescape(e.as_ref()).unwrap_or_default().to_string();
+                let text = quick_xml::escape::unescape(&**e).unwrap_or_default().to_string();
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     result.push_str(trimmed);
