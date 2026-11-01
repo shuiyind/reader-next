@@ -61,7 +61,7 @@ Reader Next 是一个面向自用与二次开发的阅读 3.0 服务端：Rust �
 
 相对于 fork 时的上游版本，本仓库近期主要增加或改进了：
 
-当前稳定版本为 [v1.0.21](https://github.com/HoshimiyaYoku/reader-next/releases/tag/v1.0.21)。
+当前稳定版本为 [v1.0.25](https://github.com/HoshimiyaYoku/reader-next/releases/tag/v1.0.25)。
 
 - 改善 iOS 添加到主屏幕后启动时的安全区域与底部空白问题。
 - 增加“搜索更多”能力，允许继续扩大搜索范围和深度。
@@ -90,7 +90,7 @@ Reader Next 是一个面向自用与二次开发的阅读 3.0 服务端：Rust �
 
 - 当前仓库：https://github.com/HoshimiyaYoku/reader-next
 - 版本发布：https://github.com/HoshimiyaYoku/reader-next/releases
-- Docker 镜像：`ghcr.io/hoshimiyayoku/reader-next`
+- Docker 镜像：`ghcr.io/shuiyind/reader-next`
 - 上游文档站：https://maple0517.github.io/reader-next/
 
 上游文档可以帮助理解 Reader Next 的基本使用方式，但本 fork 的新增功能和实际行为请以当前仓库为准。
@@ -105,7 +105,7 @@ docker run -d \
   --restart unless-stopped \
   -p 18080:18080 \
   -v reader-storage:/app/storage \
-  ghcr.io/hoshimiyayoku/reader-next:latest
+  ghcr.io/shuiyind/reader-next:latest
 ```
 
 打开：
@@ -146,10 +146,10 @@ docker compose -f deploy/compose.yml up -d
 
 常用镜像标签：
 
-- `ghcr.io/hoshimiyayoku/reader-next:latest`：最新稳定版本。
-- `ghcr.io/hoshimiyayoku/reader-next:vX.Y.Z`：固定版本。
-- `ghcr.io/hoshimiyayoku/reader-next:X.Y.Z`：同一固定版本，不带 `v`。
-- `ghcr.io/hoshimiyayoku/reader-next:X.Y`：同一 minor 系列的最新版本。
+- `ghcr.io/shuiyind/reader-next:latest`：最新稳定版本。
+- `ghcr.io/shuiyind/reader-next:vX.Y.Z`：固定版本。
+- `ghcr.io/shuiyind/reader-next:X.Y.Z`：同一固定版本，不带 `v`。
+- `ghcr.io/shuiyind/reader-next:X.Y`：同一 minor 系列的最新版本。
 
 完整 Docker 部署说明见 [docs/deploy/docker.md](docs/deploy/docker.md)。
 

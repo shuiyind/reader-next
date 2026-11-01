@@ -113,7 +113,7 @@ The production compose file requires `.env.prod`, uses a persistent host directo
 2. Bump versions and create a tag through the release helper:
 
 ```bash
-./scripts/release.sh v1.0.10
+./scripts/release.sh --patch
 ```
 
 3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/docker-publish-user.yml`.
@@ -122,7 +122,7 @@ The production compose file requires `.env.prod`, uses a persistent host directo
 Verify a published image:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.10
+docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.25
 ```
 
 ## Manual image test
