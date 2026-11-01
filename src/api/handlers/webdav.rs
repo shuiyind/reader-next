@@ -599,10 +599,28 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_xml;
+    use super::{escape_xml, webdav_propfind};
+    use uuid::Uuid;
 
     #[test]
     fn escapes_webdav_xml_values() {
         assert_eq!(escape_xml(r#"a&<>"'b"#), "a&amp;&lt;&gt;&quot;&apos;b");
+    }
+
+    #[tokio::test]
+    async fn propfind_escapes_special_path_characters() {
+        let root = std::env::temp_dir().join(format!("reader-webdav-xml-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let response = webdav_propfind(&root, r#"/a&<>"'b"#).await;
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(xml.contains("/a&amp;&lt;&gt;&quot;&apos;b/"));
+        assert!(!xml.contains(r#"/a&<>"'b/"#));
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

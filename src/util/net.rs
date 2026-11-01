@@ -262,6 +262,35 @@ mod tests {
     fn accepts_public_http_url() {
         assert!(parse_public_http_url("https://example.com/path").is_ok());
     }
+
+    #[tokio::test]
+    async fn no_redirect_client_builder_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = no_redirect_client_builder().build().unwrap();
+        let response = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        server.await.unwrap();
+    }
 }
 
 pub fn read_bytes_limited_blocking(
