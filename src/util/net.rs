@@ -26,7 +26,7 @@ pub fn parse_public_http_url(raw: &str) -> Result<Url, String> {
     {
         return Err("目标不能指向本机或私有网络".to_string());
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Some(ip) = parse_ip_host(host) {
         if !is_public_ip(ip) {
             return Err("目标不能指向本机或私有网络".to_string());
         }
@@ -37,7 +37,7 @@ pub fn parse_public_http_url(raw: &str) -> Result<Url, String> {
 pub async fn resolve_public_target(url: &Url) -> Result<SocketAddr, String> {
     let host = url.host_str().ok_or("URL 缺少主机名")?;
     let port = url.port_or_known_default().ok_or("URL 缺少端口")?;
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    if let Some(ip) = parse_ip_host(host) {
         let address = SocketAddr::new(ip, port);
         if !is_public_ip(ip) {
             return Err("目标不能指向本机或私有网络".to_string());
@@ -47,7 +47,7 @@ pub async fn resolve_public_target(url: &Url) -> Result<SocketAddr, String> {
 
     let addresses = tokio::time::timeout(
         Duration::from_secs(10),
-        lookup_host((host, port)),
+        lookup_host((host.trim_start_matches('[').trim_end_matches(']'), port)),
     )
     .await
     .map_err(|_| "目标 DNS 解析超时".to_string())?
@@ -66,7 +66,7 @@ pub async fn public_client(url: &Url, timeout: Duration) -> Result<Client, Strin
         .timeout(timeout)
         .redirect(Policy::none())
         .user_agent("reader-next/secure-fetch");
-    if host.parse::<IpAddr>().is_err() {
+    if parse_ip_host(host).is_none() {
         builder = builder.resolve(host, address);
     }
     builder.build().map_err(|error| error.to_string())
@@ -96,7 +96,7 @@ pub fn public_client_blocking(
         .timeout(timeout)
         .redirect(Policy::none())
         .user_agent("reader-next/secure-fetch");
-    if host.parse::<IpAddr>().is_err() {
+    if parse_ip_host(host).is_none() {
         builder = builder.resolve(host, address);
     }
     builder.build().map_err(|error| error.to_string())
@@ -125,6 +125,10 @@ pub async fn read_bytes_limited(
         output.extend_from_slice(&chunk);
     }
     Ok(output)
+}
+
+fn parse_ip_host(host: &str) -> Option<IpAddr> {
+    host.trim_start_matches('[').trim_end_matches(']').parse().ok()
 }
 
 pub fn is_public_ip(ip: IpAddr) -> bool {
