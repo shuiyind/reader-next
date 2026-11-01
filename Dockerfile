@@ -32,6 +32,7 @@ RUN mkdir -p /app/storage/assets \
     && chown -R reader:reader /app/storage
 
 ENV SERVER_HOST=0.0.0.0 \
+    SECURE=true \
     SERVER_PORT=18080 \
     DATABASE_URL=sqlite:/app/storage/reader.db?mode=rwc \
     STORAGE_DIR=/app/storage \

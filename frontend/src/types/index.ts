@@ -129,7 +129,7 @@ export interface BookGroup {
 export interface UserInfo {
   username: string
   lastLoginAt?: number
-  accessToken: string
+  accessToken?: string
   enableWebdav?: boolean
   enableLocalStore?: boolean
   enableAiModel?: boolean

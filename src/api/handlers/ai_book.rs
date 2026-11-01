@@ -880,6 +880,7 @@ mod tests {
             assets_dir: dir.join("assets").to_string_lossy().to_string(),
             web_root: dir.join("web").to_string_lossy().to_string(),
             database_url,
+            secure: false,
             ..AppConfig::default()
         };
         let http =

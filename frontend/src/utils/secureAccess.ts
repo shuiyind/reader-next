@@ -1,10 +1,16 @@
 export const SECURE_KEY_STORAGE_KEY = 'secureKey'
 
+let activeSecureKey = ''
+
+export function setActiveSecureKey(value: string) {
+  activeSecureKey = value.trim()
+}
+
 type StorageLike = Pick<Storage, 'getItem'>
 
 export function buildAuthHeaderValues(storage: StorageLike) {
   const accessToken = storage.getItem('accessToken')?.trim() || ''
-  const secureKey = storage.getItem(SECURE_KEY_STORAGE_KEY)?.trim() || ''
+  const secureKey = activeSecureKey || storage.getItem(SECURE_KEY_STORAGE_KEY)?.trim() || ''
 
   return {
     accessToken: accessToken || undefined,
@@ -12,14 +18,8 @@ export function buildAuthHeaderValues(storage: StorageLike) {
   }
 }
 
-export function appendAuthQueryParams(params: URLSearchParams, storage: StorageLike = localStorage) {
-  const { accessToken, secureKey } = buildAuthHeaderValues(storage)
-  if (accessToken) {
-    params.set('accessToken', accessToken)
-  }
-  if (secureKey) {
-    params.set('secureKey', secureKey)
-  }
+export function appendAuthQueryParams(_params: URLSearchParams, _storage: StorageLike = localStorage) {
+  // Session credentials are sent by the HttpOnly cookie. Never put secrets in URLs.
 }
 
 export function computeNeedSecureKey(params: {
@@ -31,5 +31,5 @@ export function computeNeedSecureKey(params: {
 }
 
 export function readStoredSecureKey(storage: StorageLike = localStorage) {
-  return storage.getItem(SECURE_KEY_STORAGE_KEY)?.trim() || ''
+  return activeSecureKey || storage.getItem(SECURE_KEY_STORAGE_KEY)?.trim() || ''
 }

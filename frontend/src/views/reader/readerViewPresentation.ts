@@ -1,4 +1,5 @@
 import type { ReaderBackgroundConfig } from '../../stores/reader'
+import { sanitizeReaderHtml } from '../../utils/sanitizeHtml'
 
 export function buildReaderBackgroundStyle(
   themeBody: string,
@@ -48,11 +49,12 @@ export function formatReaderChapterHtml(
   },
 ) {
   if (!rawText) return ''
-  let text = rawText
+  let text = sanitizeReaderHtml(rawText)
 
-  if (options.searchQuery) {
+  if (options.searchQuery && !text.includes('<')) {
     try {
-      const regex = new RegExp(`(${options.searchQuery})`, 'gi')
+      const escapedQuery = options.searchQuery.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')
+      const regex = new RegExp(`(${escapedQuery})`, 'gi')
       text = text.replace(regex, '<mark class="search-highlight">$1</mark>')
     } catch { /* invalid regex */ }
   }

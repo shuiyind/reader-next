@@ -55,7 +55,7 @@ impl<T> ApiResponse<T> {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        println!("ERROR: {:?}", self);
+        tracing::debug!("request failed");
         let (status, message) = match &self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

@@ -6,7 +6,8 @@ use base64::Engine;
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use chrono::{Local, TimeZone};
 use once_cell::sync::Lazy;
-use reqwest::blocking::Client;
+use crate::util::net::{parse_public_http_url, public_client_blocking, read_bytes_limited_blocking, MAX_REMOTE_RESPONSE_BYTES};
+
 use reqwest::Method;
 use rquickjs::function::{Func, Opt};
 use rquickjs::{Context, Object, Runtime, Value};
@@ -19,21 +20,7 @@ use uuid::Uuid;
 static JS_KV: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static JS_LIB_CACHE: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static JS_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
-    std::thread::Builder::new()
-        .name("book-source-js-http-init".to_string())
-        .spawn(|| {
-            Client::builder()
-                .gzip(true)
-                .brotli(true)
-                .deflate(true)
-                .build()
-                .expect("failed to build JS HTTP client")
-        })
-        .expect("failed to spawn JS HTTP client initialization thread")
-        .join()
-        .expect("JS HTTP client initialization thread panicked")
-});
+
 static JS_DEVICE_ID: Lazy<String> = Lazy::new(|| {
     let mut map = JS_KV.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = map.get("__device_id") {
@@ -262,6 +249,8 @@ fn eval_js_inner(
     eval_js_inner_with_source(script, input, base_url, key, page, None, bindings)
 }
 
+const MAX_JS_SCRIPT_BYTES: usize = 256 * 1024;
+
 fn eval_js_inner_with_source(
     script: &str,
     input: Option<&str>,
@@ -271,9 +260,14 @@ fn eval_js_inner_with_source(
     source_key: Option<&str>,
     bindings: Option<&HashMap<String, JsonValue>>,
 ) -> anyhow::Result<String> {
+    if script.len() > MAX_JS_SCRIPT_BYTES {
+        return Err(anyhow::anyhow!("书源脚本超过大小限制"));
+    }
     let active_source = ACTIVE_SOURCE.with(|cell| cell.borrow().clone());
     let active_bindings = ACTIVE_JS_BINDINGS.with(|cell| cell.borrow().clone());
     let rt = Runtime::new()?;
+    rt.set_memory_limit(32 * 1024 * 1024);
+    rt.set_max_stack_size(2 * 1024 * 1024);
     let ctx = Context::full(&rt)?;
     ctx.with(|ctx| {
         let globals = ctx.globals();
@@ -1118,11 +1112,11 @@ fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
 
 fn resolve_js_lib_entry(entry: &str) -> anyhow::Result<String> {
     let value = entry.trim();
-    if value.starts_with("http://") || value.starts_with("https://") {
-        let response = JS_HTTP_CLIENT.get(value).send()?;
-        return Ok(response.text().unwrap_or_default());
-    }
-    Ok(value.to_string())
+    let target = parse_public_http_url(value).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
+    let response = client.get(target).send()?;
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn java_time_format(timestamp: i64) -> String {
@@ -1155,8 +1149,9 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
     let has_request_body = method != Method::GET && method != Method::HEAD;
 
-    let mut req =
-        apply_active_source_cookies(JS_HTTP_CLIENT.request(method, url.trim()), url.trim());
+    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
+    let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
 
     let mut has_content_type = false;
     if let Some(headers) = options_json.get("headers").and_then(|v| v.as_object()) {
@@ -1200,20 +1195,23 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
     }
 
     let response = req.send()?;
-    store_active_source_cookies(url.trim(), response.headers());
-    Ok(response.text().unwrap_or_default())
+    store_active_source_cookies(target.as_str(), response.headers());
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn java_request_simple(method: &str, url: &str, body: Option<String>) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
-    let mut req =
-        apply_active_source_cookies(JS_HTTP_CLIENT.request(method, url.trim()), url.trim());
+    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
+    let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
     if let Some(body) = body {
         req = req.body(body);
     }
     let response = req.send()?;
-    store_active_source_cookies(url.trim(), response.headers());
-    Ok(response.text().unwrap_or_default())
+    store_active_source_cookies(target.as_str(), response.headers());
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn apply_active_source_cookies(

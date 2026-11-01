@@ -163,6 +163,7 @@ export const useAiBookStore = defineStore('aiBook', () => {
   const CHAPTER_GENERATE_MAX_WAIT_MS = 15 * 60 * 1000
 
   async function generateChapterMemory(params: { bookUrl: string; chapterIndex: number; mode?: AiBookGenerationMode }) {
+    let failed = false
     phase.value = 'text'
     statusText.value = `生成第 ${params.chapterIndex + 1} 章 AI 资料...`
     try {
@@ -189,11 +190,14 @@ export const useAiBookStore = defineStore('aiBook', () => {
         await new Promise((resolve) => setTimeout(resolve, CHAPTER_GENERATE_POLL_INTERVAL_MS))
       }
     } catch (error) {
+      failed = true
       setActionError((error as Error).message || 'AI 资料更新失败')
       throw error
     } finally {
-      phase.value = 'idle'
-      statusText.value = ''
+      if (!failed) {
+        phase.value = 'idle'
+        statusText.value = ''
+      }
     }
   }
 

@@ -206,13 +206,13 @@ npm run docs:build
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SERVER_HOST` | `0.0.0.0` | 服务监听地址 |
+| `SERVER_HOST` | `127.0.0.1` | 服务监听地址 |
 | `SERVER_PORT` | `18080` | 服务端口 |
 | `DATABASE_URL` | `sqlite:storage/reader.db?mode=rwc` | SQLite 数据库 |
 | `WEB_ROOT` | `frontend/dist` | 前端静态资源目录 |
-| `SECURE` | `false` | 是否启用安全模式 |
+| `SECURE` | `true` | 是否启用安全模式 |
 | `SECURE_KEY` | 空 | 安全模式密钥，生产环境不要写进镜像 |
-| `INVITE_CODE` | 空 | 注册邀请码 |
+| `INVITE_CODE` | 空 | 注册邀请码；安全模式必须配置，留空禁止开放注册 |
 | `USER_LIMIT` | `50` | 最大用户数 |
 | `USER_BOOK_LIMIT` | `2000` | 每用户最大书籍数 |
 | `LOG_LEVEL` | `info` | 日志级别 |

@@ -1,4 +1,5 @@
 use crate::crawler::http_client::HttpClient;
+use crate::util::net::{parse_public_http_url, public_client, MAX_REMOTE_RESPONSE_BYTES};
 use base64::Engine;
 use encoding_rs::Encoding;
 use serde::{Deserialize, Serialize};
@@ -72,18 +73,22 @@ pub struct StrResponse {
     pub is_successful: bool,
 }
 
-pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<FetchResponse> {
+pub async fn fetch(_client: &HttpClient, req: RequestSpec) -> anyhow::Result<FetchResponse> {
     if req.url.starts_with("data:") {
         return fetch_data_url(&req);
     }
 
+    let target = parse_public_http_url(&req.url).map_err(|error| anyhow::anyhow!(error))?;
     let mut last_err: Option<anyhow::Error> = None;
     let max_retries = req.retry;
     for attempt in 0..=max_retries {
         let req = req.clone();
+        let client = public_client(&target, Duration::from_secs(30))
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
         let mut builder = match req.method {
-            HttpMethod::GET => client.client().get(&req.url),
-            HttpMethod::POST => client.client().post(&req.url),
+            HttpMethod::GET => client.get(target.clone()),
+            HttpMethod::POST => client.post(target.clone()),
         };
 
         let mut has_content_type = false;
@@ -101,22 +106,14 @@ pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<Fetc
                     "application/x-www-form-urlencoded",
                 );
             }
-            println!("DEBUG: fetch sending body: {}", body);
             builder = builder.body(body);
         }
 
-        println!(
-            "DEBUG: fetch executing {} request to: {}",
-            match req.method {
-                HttpMethod::GET => "GET",
-                HttpMethod::POST => "POST",
-            },
-            req.url
-        );
+        tracing::debug!("fetch executing request");
         match builder.send().await {
             Ok(res) => {
                 let status = res.status().as_u16();
-                println!("DEBUG: fetch response status: {}", status);
+                tracing::debug!("fetch response status: {}", status);
                 let is_successful = res.status().is_success();
                 let url = res.url().to_string();
                 let content_type = res
@@ -134,7 +131,7 @@ pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<Fetc
                             .map(|value| (name.to_string(), value.to_string()))
                     })
                     .collect::<Vec<_>>();
-                let bytes = res.bytes().await?;
+                let bytes = crate::util::net::read_bytes_limited(res, MAX_REMOTE_RESPONSE_BYTES).await.map_err(|error| anyhow::anyhow!(error))?;
                 let mut body = if req
                     .response_type
                     .as_deref()

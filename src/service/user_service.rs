@@ -1,15 +1,26 @@
 use crate::app::config::AppConfig;
 use crate::error::error::AppError;
 use crate::model::user::User;
-use crate::util::crypto::{gen_encrypted_password, random_string};
+use crate::util::crypto::{constant_time_eq, gen_encrypted_password, hash_password, password_needs_rehash, random_string, verify_password};
+use crate::util::path::safe_path_component;
 use crate::util::time::now_ts;
 use serde_json::Value;
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::fs;
 
 const TOKEN_TTL_MS: i64 = 7 * 86_400 * 1000;
+const MAX_LOGIN_FAILURES: u32 = 5;
+const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Default)]
+struct LoginFailureState {
+    failures: u32,
+    window_started: Option<Instant>,
+}
 
 #[derive(Clone)]
 pub struct UserService {
@@ -17,6 +28,7 @@ pub struct UserService {
     users_path: PathBuf,
     data_root: PathBuf,
     pool: SqlitePool,
+    login_failures: Arc<Mutex<HashMap<String, LoginFailureState>>>,
 }
 
 impl UserService {
@@ -28,6 +40,7 @@ impl UserService {
             users_path,
             data_root,
             pool,
+            login_failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -61,7 +74,60 @@ impl UserService {
     }
 
     pub fn secure_key_matches(&self, key: &str) -> bool {
-        !self.cfg.secure_key.is_empty() && self.cfg.secure_key == key
+        !self.cfg.secure_key.is_empty()
+            && constant_time_eq(self.cfg.secure_key.as_bytes(), key.as_bytes())
+    }
+
+    fn ensure_login_allowed(&self, username: &str) -> Result<(), AppError> {
+        let key = username.trim().to_ascii_lowercase();
+        let mut failures = self
+            .login_failures
+            .lock()
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("login rate limiter unavailable")))?;
+        let expired = failures
+            .get(&key)
+            .map(|state| {
+                state
+                    .window_started
+                    .map(|started| started.elapsed() >= LOGIN_FAILURE_WINDOW)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if expired {
+            failures.remove(&key);
+        } else if failures
+            .get(&key)
+            .map(|state| state.failures >= MAX_LOGIN_FAILURES)
+            .unwrap_or(false)
+        {
+            return Err(AppError::BadRequest("登录尝试过于频繁，请稍后再试".to_string()));
+        }
+        Ok(())
+    }
+
+    fn record_login_failure(&self, username: &str) {
+        let key = username.trim().to_ascii_lowercase();
+        if let Ok(mut failures) = self.login_failures.lock() {
+            let now = Instant::now();
+            let state = failures.entry(key).or_default();
+            if state
+                .window_started
+                .map(|started| started.elapsed() >= LOGIN_FAILURE_WINDOW)
+                .unwrap_or(true)
+            {
+                *state = LoginFailureState {
+                    failures: 0,
+                    window_started: Some(now),
+                };
+            }
+            state.failures = state.failures.saturating_add(1);
+        }
+    }
+
+    fn clear_login_failures(&self, username: &str) {
+        if let Ok(mut failures) = self.login_failures.lock() {
+            failures.remove(&username.trim().to_ascii_lowercase());
+        }
     }
 
     pub async fn login(
@@ -72,20 +138,33 @@ impl UserService {
         code: Option<&str>,
     ) -> Result<Value, AppError> {
         self.ensure_admin_user().await?;
+        if is_login {
+            self.ensure_login_allowed(username)?;
+        }
         if let Some(mut user) = self.find_user(username).await? {
             if !is_login {
                 return Err(AppError::BadRequest("用户名已被占用".to_string()));
             }
-            let encrypted = gen_encrypted_password(password, &user.salt);
-            if encrypted != user.password {
-                return Err(AppError::BadRequest("密码错误".to_string()));
+            if !verify_password(password, &user.password, &user.salt) {
+                self.record_login_failure(username);
+                return Err(AppError::BadRequest("用户名或密码错误".to_string()));
             }
+            if password_needs_rehash(&user.password) {
+                user.salt = random_string(32);
+                user.password = hash_password(password, &user.salt);
+                self.upsert_user_row(&user).await?;
+            }
+            self.clear_login_failures(username);
             let login_data = self.save_new_session(&mut user).await?;
             return Ok(login_data);
         }
 
         if is_login {
-            return Err(AppError::BadRequest("用户不存在".to_string()));
+            self.record_login_failure(username);
+            return Err(AppError::BadRequest("用户名或密码错误".to_string()));
+        }
+        if self.cfg.secure && self.cfg.invite_code.is_empty() {
+            return Err(AppError::BadRequest("邀请码未配置，禁止开放注册".to_string()));
         }
         self.validate_new_user(username, password, code)?;
         let user_count = self.user_count().await?;
@@ -93,8 +172,8 @@ impl UserService {
             return Err(AppError::BadRequest("超过用户数上限".to_string()));
         }
 
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
+        let salt = random_string(32);
+        let encrypted = hash_password(password, &salt);
         let now = now_ms();
         let mut user = User {
             username: username.to_string(),
@@ -115,11 +194,11 @@ impl UserService {
     }
 
     pub async fn logout(&self, access_token: &str) -> Result<(), AppError> {
-        let (username, token) = parse_access_token(access_token)?;
         let user = self
-            .find_user(&username)
+            .check_auth(access_token)
             .await?
-            .ok_or_else(|| AppError::BadRequest("系统错误".to_string()))?;
+            .ok_or_else(|| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+        let (username, token) = parse_access_token(access_token)?;
         sqlx::query("DELETE FROM user_sessions WHERE username=?1 AND token=?2")
             .bind(&username)
             .bind(&token)
@@ -144,7 +223,7 @@ impl UserService {
             match self.check_auth(token).await {
                 Ok(Some(user)) => {
                     return Ok((
-                        Some(self.format_user(&user)),
+                        Some(self.format_user_public(&user)),
                         self.cfg.secure,
                         self.secure_key_required(),
                         admin_authorized,
@@ -195,19 +274,24 @@ impl UserService {
 
     pub async fn get_user_list(&self) -> Result<Vec<Value>, AppError> {
         let users = self.load_users().await?;
-        Ok(users.values().map(|u| self.format_user(u)).collect())
+        Ok(users.values().map(|u| self.format_user_public(u)).collect())
     }
 
     pub async fn add_user(&self, username: &str, password: &str) -> Result<Vec<Value>, AppError> {
-        self.validate_new_user(username, password, None)?;
+        let admin_invite_code = if self.cfg.invite_code.is_empty() {
+            None
+        } else {
+            Some(self.cfg.invite_code.as_str())
+        };
+        self.validate_new_user(username, password, admin_invite_code)?;
         if self.find_user(username).await?.is_some() {
             return Err(AppError::BadRequest("用户已存在".to_string()));
         }
         if self.user_count().await? as u32 >= self.cfg.user_limit {
             return Err(AppError::BadRequest("超过用户数上限".to_string()));
         }
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
+        let salt = random_string(32);
+        let encrypted = hash_password(password, &salt);
         let now = now_ms();
         let user = User {
             username: username.to_string(),
@@ -237,11 +321,16 @@ impl UserService {
             .find_user(username)
             .await?
             .ok_or_else(|| AppError::BadRequest("用户不存在".to_string()))?;
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(password, &salt);
+        let salt = random_string(32);
+        let encrypted = hash_password(password, &salt);
         user.salt = salt;
         user.password = encrypted;
+        user.token = String::new();
         self.upsert_user_row(&user).await?;
+        sqlx::query("DELETE FROM user_sessions WHERE username=?1")
+            .bind(&user.username)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -256,16 +345,19 @@ impl UserService {
         }
         let (username, token) = parse_access_token(access_token)?;
         let mut user = self
-            .find_user(&username)
+            .check_auth(access_token)
             .await?
-            .ok_or_else(|| AppError::BadRequest("用户不存在".to_string()))?;
-        let encrypted_old = gen_encrypted_password(old_password, &user.salt);
-        if encrypted_old != user.password {
+            .ok_or_else(|| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+        if user.username != username {
+            return Err(AppError::BadRequest("NEED_LOGIN".to_string()));
+        }
+        let encrypted_old = verify_password(old_password, &user.password, &user.salt);
+        if !encrypted_old {
             return Err(AppError::BadRequest("当前密码错误".to_string()));
         }
 
-        let salt = random_string(8);
-        let encrypted = gen_encrypted_password(new_password, &salt);
+        let salt = random_string(32);
+        let encrypted = hash_password(new_password, &salt);
         let now = now_ms();
         user.salt = salt;
         user.password = encrypted;
@@ -284,6 +376,7 @@ impl UserService {
 
     pub async fn delete_users(&self, usernames: &[String]) -> Result<Vec<Value>, AppError> {
         for u in usernames {
+            safe_path_component(u, "用户名").map_err(|_| AppError::BadRequest("非法用户名".to_string()))?;
             sqlx::query("DELETE FROM user_sessions WHERE username=?1")
                 .bind(u)
                 .execute(&self.pool)
@@ -425,7 +518,8 @@ impl UserService {
                     if let Some(ns) = user_ns {
                         let ns = ns.trim();
                         if !ns.is_empty() {
-                            return Ok(ns.to_string());
+                            return safe_path_component(ns, "用户命名空间")
+                                .map_err(|_| AppError::BadRequest("非法用户命名空间".to_string()));
                         }
                     }
                     return Ok("default".to_string());
@@ -451,6 +545,7 @@ impl UserService {
         if !self.cfg.secure {
             return Ok(None);
         }
+        self.ensure_login_allowed(username)?;
         let user = match self.find_user(username).await? {
             Some(u) => u,
             None => return Ok(None),
@@ -458,10 +553,11 @@ impl UserService {
         if !user.enable_webdav {
             return Ok(None);
         }
-        let encrypted = gen_encrypted_password(password, &user.salt);
-        if encrypted != user.password {
+        if !verify_password(password, &user.password, &user.salt) {
+            self.record_login_failure(username);
             return Ok(None);
         }
+        self.clear_login_failures(username);
         Ok(Some(user))
     }
 
@@ -493,20 +589,30 @@ impl UserService {
         self.upsert_session(&user.username, &user.token, session_expire_at(now))
             .await?;
         user.token_map = Some(self.load_session_map(&user.username).await?);
-        Ok(self.format_user(user))
+        Ok(self.format_user_with_access_token(user))
     }
 
-    fn format_user(&self, user: &User) -> Value {
+    fn format_user_public(&self, user: &User) -> Value {
         serde_json::json!({
             "username": user.username,
             "lastLoginAt": user.last_login_at,
-            "accessToken": format!("{}:{}", user.username, user.token),
             "enableWebdav": user.enable_webdav,
             "enableLocalStore": user.enable_local_store,
             "enableAiModel": user.enable_ai_model,
             "createdAt": user.created_at,
             "isAdmin": user.is_admin,
         })
+    }
+
+    fn format_user_with_access_token(&self, user: &User) -> Value {
+        let mut value = self.format_user_public(user);
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "accessToken".to_string(),
+                Value::from(format!("{}:{}", user.username, user.token)),
+            );
+        }
+        value
     }
 
     fn collect_active_sessions(&self, user: &User, now: i64) -> HashMap<String, i64> {
@@ -529,8 +635,8 @@ impl UserService {
         map
     }
 
-    fn generate_session_token(&self, username: &str) -> String {
-        gen_encrypted_password(username, &format!("{}{}", now_ms(), random_string(8)))
+    fn generate_session_token(&self, _username: &str) -> String {
+        random_string(43)
     }
 
     async fn load_users(&self) -> Result<HashMap<String, User>, AppError> {
@@ -834,6 +940,7 @@ mod tests {
             std::env::temp_dir().join(format!("reader-next-user-service-{}", random_string(8)));
         let cfg = AppConfig {
             secure: true,
+            invite_code: "invite-test".to_string(),
             storage_dir: temp_dir.to_string_lossy().to_string(),
             ..AppConfig::default()
         };
@@ -884,7 +991,7 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         let first_login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let first_access_token = first_login["accessToken"].as_str().unwrap().to_string();
@@ -931,7 +1038,7 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         let login = service
-            .login("reader2", "password123", false, None)
+            .login("reader2", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();
@@ -954,10 +1061,7 @@ mod tests {
         assert!(secure);
         assert!(!secure_key_required);
         assert!(admin_authorized);
-        assert_eq!(
-            user_info.unwrap()["accessToken"].as_str().unwrap(),
-            access_token
-        );
+        assert!(user_info.unwrap().get("accessToken").is_none());
 
         let users = service.load_users().await.unwrap();
         let expire_at = users
@@ -998,7 +1102,7 @@ mod tests {
     async fn get_user_info_returns_logged_in_user_when_secure_is_disabled() {
         let (mut service, temp_dir) = create_user_service().await;
         let login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();
@@ -1019,7 +1123,7 @@ mod tests {
     async fn secure_disabled_uses_logged_in_namespace_or_default() {
         let (mut service, temp_dir) = create_user_service().await;
         let login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();
@@ -1050,12 +1154,12 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         let first_login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let first_access_token = first_login["accessToken"].as_str().unwrap().to_string();
         let _ = service
-            .login("reader2", "password123", false, None)
+            .login("reader2", "password123", false, Some("invite-test"))
             .await
             .unwrap();
 
@@ -1116,7 +1220,7 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         let login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();
@@ -1139,7 +1243,7 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let mut stale_user = service.find_user("reader1").await.unwrap().unwrap();
@@ -1160,7 +1264,7 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         sqlx::query(
@@ -1227,11 +1331,11 @@ mod tests {
         let (service, temp_dir) = create_user_service().await;
 
         let _admin = service
-            .login("admin", "password123", false, None)
+            .login("admin", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let login = service
-            .login("reader1", "password123", false, None)
+            .login("reader1", "password123", false, Some("invite-test"))
             .await
             .unwrap();
         let access_token = login["accessToken"].as_str().unwrap().to_string();

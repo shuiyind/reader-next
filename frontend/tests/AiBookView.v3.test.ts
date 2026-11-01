@@ -149,18 +149,18 @@ describe('AiBookView v3 behavior', () => {
     expect(wrapper.text()).toContain('当前章节还没有摘要')
   })
 
-  it('shows disabled map notice in V3 cutover', async () => {
+  it('shows the map empty state when no location data exists', async () => {
     const wrapper = mount(AiBookView)
     await flushPromises()
 
     await wrapper.get('nav.tabs button:nth-child(4)').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('地图生成功能已暂时禁用')
-    expect(wrapper.text()).toContain('V3 切换期间，地图生成与持久化暂未接入')
+    expect(wrapper.text()).toContain('暂无地点资料，暂时无法生成地图。')
+    expect(wrapper.text()).toContain('等待地点资料')
   })
 
-  it('disables map action during V3 cutover', async () => {
+  it('disables map action without location data', async () => {
     const wrapper = mount(AiBookView)
     await flushPromises()
 

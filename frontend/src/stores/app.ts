@@ -4,7 +4,7 @@ import { getUserInfo } from '../api/user'
 import { dismissVersionUpdate, getVersionUpdate } from '../api/update'
 import type { UserInfo, VersionUpdateInfo } from '../types'
 import { applySystemTheme } from '../utils/systemUi'
-import { computeNeedSecureKey, readStoredSecureKey, SECURE_KEY_STORAGE_KEY } from '../utils/secureAccess'
+import { computeNeedSecureKey, readStoredSecureKey, setActiveSecureKey } from '../utils/secureAccess'
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 type ResolvedTheme = Exclude<ThemeMode, 'system'>
@@ -97,7 +97,8 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function setUser(user: UserInfo) {
-    userInfo.value = user
+    const safeUser = { ...user, accessToken: undefined }
+    userInfo.value = safeUser
     isLoggedIn.value = true
     adminAuthorized.value = adminAuthorized.value || !!user.isAdmin
     needSecureKey.value = computeNeedSecureKey({
@@ -105,7 +106,7 @@ export const useAppStore = defineStore('app', () => {
       secureKeyRequired: secureKeyRequired.value,
       adminAuthorized: adminAuthorized.value,
     })
-    localStorage.setItem('accessToken', user.accessToken)
+
     if (canCheckVersionUpdate.value) {
       void checkVersionUpdate()
     }
@@ -115,20 +116,19 @@ export const useAppStore = defineStore('app', () => {
     userInfo.value = null
     isLoggedIn.value = false
     localStorage.removeItem('accessToken')
+    localStorage.removeItem('secureKey')
+    setActiveSecureKey('')
+    secureKey.value = ''
   }
 
   function setSecureKey(value: string) {
     const next = value.trim()
     secureKey.value = next
-    if (next) {
-      localStorage.setItem(SECURE_KEY_STORAGE_KEY, next)
-    } else {
-      localStorage.removeItem(SECURE_KEY_STORAGE_KEY)
-    }
+    setActiveSecureKey(next)
   }
 
   function updateUserInfo(next: UserInfo | null) {
-    userInfo.value = next
+    userInfo.value = next ? { ...next, accessToken: undefined } : next
     isLoggedIn.value = !!next?.username
   }
 

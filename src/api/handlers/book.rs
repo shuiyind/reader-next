@@ -2222,20 +2222,33 @@ pub async fn get_shelf_book_with_cache_info(
 
 pub async fn get_book_cover(
     State(state): State<AppState>,
+    auth: AuthContext,
     Query(q): Query<CoverQuery>,
 ) -> Result<Response, AppError> {
     let url = match q.path {
         Some(u) if !u.trim().is_empty() => u,
         _ => return Ok(StatusCode::NOT_FOUND.into_response()),
     };
-    // Use "public" namespace for unauthenticated cover requests
-    match state.book_service.get_cover("public", &url).await {
+    let user_ns = state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+    match state.book_service.get_cover(&user_ns, &url).await {
         Ok((bytes, content_type)) => {
             let mut resp = Response::new(Body::from(bytes));
             let headers = resp.headers_mut();
             headers.insert(
                 header::CACHE_CONTROL,
-                header::HeaderValue::from_static("86400"),
+                header::HeaderValue::from_static("public, max-age=86400"),
+            );
+            headers.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                header::HeaderValue::from_static("nosniff"),
+            );
+            headers.insert(
+                header::CONTENT_SECURITY_POLICY,
+                header::HeaderValue::from_static("default-src 'none'; sandbox"),
             );
             if let Ok(v) = header::HeaderValue::from_str(&content_type) {
                 headers.insert(header::CONTENT_TYPE, v);

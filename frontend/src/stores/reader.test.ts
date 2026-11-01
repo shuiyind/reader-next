@@ -572,9 +572,7 @@ describe('reader local txt chapters', () => {
     expect(saveBookProgress).toHaveBeenCalledTimes(1)
   })
 
-  it('parses keepalive responses and sends both authentication headers', async () => {
-    localStorage.setItem('accessToken', ' user-token ')
-    localStorage.setItem('secureKey', ' server-key ')
+  it('parses keepalive responses without exposing credentials in request headers', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
@@ -600,8 +598,6 @@ describe('reader local txt chapters', () => {
       keepalive: true,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: 'user-token',
-        'X-Secure-Key': 'server-key',
       },
       body: JSON.stringify({ bookUrl: 'book-keepalive', index: 3, position: 4200, revision: 8 }),
     }))

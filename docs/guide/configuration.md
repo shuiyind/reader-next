@@ -8,7 +8,7 @@ Reader Next 通过环境变量进行配置。默认配置定义在 `src/app/conf
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `SERVER_HOST` | `0.0.0.0` | 服务器绑定地址 |
+| `SERVER_HOST` | `127.0.0.1` | 服务器绑定地址 |
 | `SERVER_PORT` | `18080` | 服务器端口 |
 
 ### 数据库配置
@@ -34,14 +34,14 @@ Reader Next 通过环境变量进行配置。默认配置定义在 `src/app/conf
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `SECURE` | `false` | 是否启用安全模式 |
+| `SECURE` | `true` | 是否启用安全模式 |
 | `SECURE_KEY` | 空 | 安全模式密钥 |
 
 ### 用户配置
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `INVITE_CODE` | 空 | 注册邀请码，留空则不需要邀请码 |
+| `INVITE_CODE` | 空 | 注册邀请码；安全模式必须配置，留空禁止开放注册 |
 | `USER_LIMIT` | `50` | 最大用户数 |
 | `USER_BOOK_LIMIT` | `2000` | 每用户最大书籍数 |
 
@@ -69,8 +69,8 @@ export APP__SERVER__PORT=3000
 SERVER_PORT=18080
 DATABASE_URL=sqlite:storage/reader.db?mode=rwc
 LOG_LEVEL=debug
-SECURE=false
-INVITE_CODE=
+SECURE=true
+INVITE_CODE=change-me
 USER_LIMIT=50
 USER_BOOK_LIMIT=2000
 REQUEST_TIMEOUT_SECS=15

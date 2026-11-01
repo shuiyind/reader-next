@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::error::error::{ApiResponse, AppError};
 use crate::model::rss::{RssArticle, RssSource};
+use crate::util::net::{parse_public_http_url, public_client, read_bytes_limited, MAX_REMOTE_RESPONSE_BYTES};
 use crate::util::time::now_ts;
 
 #[derive(Debug, Deserialize)]
@@ -134,43 +135,42 @@ pub async fn delete_rss_sources(
 }
 
 pub async fn read_remote_rss_source_file(
+    State(state): State<AppState>,
+    auth: AuthContext,
     Json(param): Json<RemoteRssSourceParam>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .danger_accept_invalid_certs(true)
-        .build()
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    let text = client
-        .get(&param.url)
+    resolve_user_ns(&state, auth.access_token(), auth.secure_key(), auth.user_ns()).await?;
+    let target = parse_public_http_url(&param.url).map_err(AppError::BadRequest)?;
+    let client = public_client(&target, std::time::Duration::from_secs(30))
+        .await
+        .map_err(AppError::BadRequest)?;
+    let response = client
+        .get(target)
         .send()
         .await
-        .map_err(|e| AppError::BadRequest(format!("网络请求失败: {}", e)))?
-        .text()
+        .map_err(|e| AppError::BadRequest(format!("网络请求失败: {e}")))?;
+    let bytes = read_bytes_limited(response, MAX_REMOTE_RESPONSE_BYTES)
         .await
-        .map_err(|e| AppError::BadRequest(format!("读取响应失败: {}", e)))?;
-
+        .map_err(AppError::BadRequest)?;
+    let text = String::from_utf8_lossy(&bytes);
     let sources: Vec<RssSource> = serde_json::from_str(&text).or_else(|_| {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
             extract_rss_sources(v)
         } else {
-            Err(AppError::BadRequest(
-                "invalid rss sources json format".to_string(),
-            ))
+            Err(AppError::BadRequest("invalid rss sources json format".to_string()))
         }
     })?;
-
     let json_str = serde_json::to_string(&sources)
-        .map_err(|e| AppError::BadRequest(format!("序列化RSS源失败: {}", e)))?;
-
+        .map_err(|e| AppError::BadRequest(format!("序列化RSS源失败: {e}")))?;
     Ok(Json(ApiResponse::ok(vec![json_str])))
 }
 
 pub async fn read_rss_source_file(
+    State(state): State<AppState>,
+    auth: AuthContext,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    resolve_user_ns(&state, auth.access_token(), auth.secure_key(), auth.user_ns()).await?;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -230,17 +230,18 @@ pub async fn get_rss_articles(
         .find(|s| s.source_url == source_url)
         .ok_or_else(|| AppError::BadRequest("RSS源不存在".to_string()))?;
 
-    let res = state
-        .book_service
-        .http_client()
-        .get(&sort_url)
+    let target = parse_public_http_url(&sort_url).map_err(AppError::BadRequest)?;
+    let client = public_client(&target, std::time::Duration::from_secs(30))
+        .await
+        .map_err(AppError::BadRequest)?;
+    let res = client
+        .get(target)
         .send()
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-    let bytes = res
-        .bytes()
+    let bytes = read_bytes_limited(res, MAX_REMOTE_RESPONSE_BYTES)
         .await
-        .map_err(|e| AppError::Internal(e.into()))?;
+        .map_err(AppError::BadRequest)?;
     let feed =
         feed_rs::parser::parse(&bytes[..]).map_err(|e| AppError::BadRequest(e.to_string()))?;
 
@@ -329,14 +330,19 @@ pub async fn get_rss_content(
         .find(|s| s.source_url == source_url)
         .ok_or_else(|| AppError::BadRequest("RSS源不存在".to_string()))?;
 
-    let res = state
-        .book_service
-        .http_client()
-        .get(&link)
+    let target = parse_public_http_url(&link).map_err(AppError::BadRequest)?;
+    let client = public_client(&target, std::time::Duration::from_secs(30))
+        .await
+        .map_err(AppError::BadRequest)?;
+    let res = client
+        .get(target)
         .send()
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-    let body = res.text().await.map_err(|e| AppError::Internal(e.into()))?;
+    let bytes = read_bytes_limited(res, MAX_REMOTE_RESPONSE_BYTES)
+        .await
+        .map_err(AppError::BadRequest)?;
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(Json(ApiResponse::ok(Value::String(body))))
 }
 

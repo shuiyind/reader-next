@@ -22,7 +22,7 @@ describe('secureAccess', () => {
     })
   })
 
-  it('adds stored auth values to event source query params', () => {
+  it('never adds auth values to event source query params', () => {
     const storage = {
       getItem(key: string) {
         if (key === 'accessToken') return 'alice-token'
@@ -34,8 +34,7 @@ describe('secureAccess', () => {
 
     appendAuthQueryParams(params, storage)
 
-    expect(params.get('accessToken')).toBe('alice-token')
-    expect(params.get('secureKey')).toBe('admin-key')
+    expect(params.toString()).toBe('')
   })
 
   it('requires secure key only when the server requires it and current request is not admin authorized', () => {
