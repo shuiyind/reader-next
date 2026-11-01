@@ -192,8 +192,10 @@ export const useAiBookStore = defineStore('aiBook', () => {
       setActionError((error as Error).message || 'AI 资料更新失败')
       throw error
     } finally {
-      phase.value = 'idle'
-      statusText.value = ''
+      if (phase.value !== 'error') {
+        phase.value = 'idle'
+        statusText.value = ''
+      }
     }
   }
 
