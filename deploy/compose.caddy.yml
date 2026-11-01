@@ -1,11 +1,11 @@
 services:
   reader:
-    image: ${READER_IMAGE:-ghcr.io/maple0517/reader-next:latest}
+    image: ${READER_IMAGE:-ghcr.io/shuiyind/reader-next:latest}
     container_name: reader-next-prod
     restart: unless-stopped
     env_file:
       - path: ../.env.prod
-        required: false
+        required: true
     environment:
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 18080
@@ -33,8 +33,12 @@ services:
     restart: unless-stopped
     depends_on:
       - reader
+    environment:
+      READER_DOMAIN: ${READER_DOMAIN:-localhost}
     ports:
       - "80:80"
+      - "443:443"
+      - "443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /opt/reader/caddy-data:/data

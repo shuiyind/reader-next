@@ -9,18 +9,18 @@ Dockerfile                         # canonical image build entrypoint
 deploy/
   compose.yml                      # simple user deployment
   compose.local.yml                # local always-on container bound to repo storage/
-  Caddyfile                        # optional Caddy reverse proxy config
+  Caddyfile                        # Caddy HTTPS reverse proxy config
   compose.caddy.yml                # production sample with Caddy
   env.docker.example               # deploy/compose.yml environment template
   env.prod.example                 # VPS deployment environment template
-.github/workflows/docker-publish.yml # multi-arch GHCR publishing
+.github/workflows/docker-publish-user.yml # multi-arch GHCR publishing
 ```
 
 Deprecated root files were removed: `Dockerfile.prod`, `Dockerfile.x86`, `docker-compose.prod.yml`, `DOCKER_RELEASE.md`, and `RELEASE_WORKFLOW.md`.
 
 ## Published image
 
-Default image repo: `ghcr.io/maple0517/reader-next`.
+Default image repo: `ghcr.io/shuiyind/reader-next`.
 
 Tags:
 
@@ -82,18 +82,30 @@ cp .env.dev.example .env.dev
 
 ## Production sample with Caddy
 
-Run from the repository root:
+Set a real public hostname and edit the generated secrets before starting:
 
 ```bash
-cp deploy/env.prod.example .env.prod
-docker compose -f deploy/compose.caddy.yml up -d
+READER_DOMAIN=reader.example.com APP_DIR=/opt/reader/app scripts/deploy-do.sh
 ```
 
-The deploy script uses the same compose file:
+The script requires `READER_DOMAIN`, creates `.env.prod` with random `SECURE_KEY` and `INVITE_CODE`, and stores the file with mode `600`. Caddy listens on ports 80 and 443 and obtains/renews TLS certificates automatically for the configured public hostname. Port 80 is used only for ACME HTTP-01 and HTTP-to-HTTPS redirect.
+
+If Caddy runs behind another TLS terminator, use `deploy/compose.yml` and bind `READER_PORT` only to the trusted proxy network instead of exposing it publicly.
+
+## Backups and recovery
+
+`/opt/reader/storage` contains SQLite data, uploads, and caches and must remain mounted across upgrades. Create an online SQLite-consistent archive with:
 
 ```bash
-APP_DIR=/opt/reader/app scripts/deploy-do.sh
+STORAGE_DIR=/opt/reader/storage \
+BACKUP_DIR=/opt/reader/backups \
+BACKUP_RETENTION_DAYS=14 \
+/opt/reader/app/scripts/backup-storage.sh
 ```
+
+Schedule that command daily with cron or a systemd timer. Keep backups on separate storage and periodically restore one into a staging directory to verify recovery. Back up `.env.prod` separately with restrictive permissions; never include secrets in the data archive.
+
+The production compose file requires `.env.prod`, uses a persistent host directory for application data, and persists Caddy certificates/config under `/opt/reader`.
 
 ## Release flow
 
@@ -104,13 +116,13 @@ APP_DIR=/opt/reader/app scripts/deploy-do.sh
 ./scripts/release.sh v1.0.10
 ```
 
-3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/docker-publish.yml`.
+3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/docker-publish-user.yml`.
 4. The workflow builds `amd64` and `arm64` natively, then creates a multi-arch manifest.
 
 Verify a published image:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/maple0517/reader-next:v1.0.10
+docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.10
 ```
 
 ## Manual image test

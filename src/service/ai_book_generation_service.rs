@@ -897,7 +897,7 @@ struct ProxyChapterGenerationModel {
 impl ProxyChapterGenerationModel {
     /// 构造携带共享 HTTP client 的代理生成模型；client 构建失败时向上返回错误而不是 panic。
     fn new(ai_model_service: Arc<AiModelService>) -> Result<Self, AppError> {
-        let client = Client::builder().timeout(ai_proxy_timeout()).build()?;
+        let client = crate::util::net::no_redirect_client_builder().timeout(ai_proxy_timeout()).build()?;
         Ok(Self {
             ai_model_service,
             client,

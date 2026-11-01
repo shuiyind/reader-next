@@ -15,7 +15,7 @@ Reader Next 是一个面向自用与二次开发的阅读 3.0 服务端：Rust �
 
 1. [hectorqin/reader](https://github.com/hectorqin/reader) 提供了重要的阅读服务能力与项目基础。
 2. [givenge/reader-rust](https://github.com/givenge/reader-rust) 进行了 Rust 服务端方向的探索与实现。
-3. [Maple0517/reader-next](https://github.com/Maple0517/reader-next) 在此基础上持续维护，并发展了当前 Reader Next 的主体架构和大量功能。
+3. [Maple0517/reader-next](https://github.com/Maple0517/reader-next) 在此基础上继续维护，并发展了当前 Reader Next 的主体架构和大量功能。
 4. 本仓库 [HoshimiyaYoku/reader-next](https://github.com/HoshimiyaYoku/reader-next) 基于上述成果，继续加入个人需要的增强和兼容性修复。
 
 感谢所有原作者、维护者、贡献者、问题反馈者和书源作者。没有这些上游工作，就没有本仓库。

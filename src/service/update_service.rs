@@ -255,3 +255,19 @@ fn trim_version(version: &str) -> String {
         .unwrap_or_default()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn package_versions_match_backend_version() {
+        let backend = env!("CARGO_PKG_VERSION");
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../frontend/package.json")).unwrap();
+        let package_lock: serde_json::Value =
+            serde_json::from_str(include_str!("../../frontend/package-lock.json")).unwrap();
+
+        assert_eq!(package["version"].as_str(), Some(backend));
+        assert_eq!(package_lock["version"].as_str(), Some(backend));
+        assert_eq!(package_lock["packages"][""]["version"].as_str(), Some(backend));
+    }
+}

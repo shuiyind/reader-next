@@ -334,6 +334,8 @@ async fn webdav_propfind(full: &PathBuf, rel: &str) -> Response {
     let mut response =
         String::from(r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">"#);
     let add_entry = |resp: &mut String, href: String, is_dir: bool, size: u64, modified: String| {
+        let href = escape_xml(&href);
+        let modified = escape_xml(&modified);
         if is_dir {
             resp.push_str(&format!(r#"<D:response><D:href>{}</D:href><D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:getlastmodified>{}</D:getlastmodified><D:creationdate>{}</D:creationdate><D:resourcetype><D:collection /></D:resourcetype><D:displayname></D:displayname></D:prop></D:propstat></D:response>"#, href, modified, modified));
         } else {
@@ -563,7 +565,8 @@ fn webdav_lock(path: &str) -> Response {
     let lock_token = format!("urn:uuid:{}", Uuid::new_v4());
     let response = format!(
         r#"<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktype><write /></D:locktype><D:lockscope><exclusive /></D:lockscope><D:locktoken><D:href>{}</D:href></D:locktoken><D:lockroot><D:href>{}</D:href></D:lockroot><D:depth>infinity</D:depth><D:timeout>Second-3600</D:timeout></D:activelock></D:lockdiscovery></D:prop>"#,
-        lock_token, path
+        lock_token,
+        escape_xml(path)
     );
     let mut resp = Response::new(axum::body::Body::from(response));
     if let Ok(v) = lock_token.parse() {
@@ -583,4 +586,41 @@ fn webdav_unlock(headers: &HeaderMap) -> Response {
         resp.headers_mut().insert("Lock-Token", v);
     }
     resp
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{escape_xml, webdav_propfind};
+    use uuid::Uuid;
+
+    #[test]
+    fn escapes_webdav_xml_values() {
+        assert_eq!(escape_xml(r#"a&<>"'b"#), "a&amp;&lt;&gt;&quot;&apos;b");
+    }
+
+    #[tokio::test]
+    async fn propfind_escapes_special_path_characters() {
+        let root = std::env::temp_dir().join(format!("reader-webdav-xml-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let response = webdav_propfind(&root, r#"/a&<>"'b"#).await;
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(xml.contains("/a&amp;&lt;&gt;&quot;&apos;b/"));
+        assert!(!xml.contains(r#"/a&<>"'b/"#));
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }

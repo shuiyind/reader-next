@@ -82,6 +82,11 @@ fn ai_proxy_url_rejects_non_http_targets() {
 
     let image_err = validate_ai_proxy_image_url("data:image/png;base64,abc").unwrap_err();
     assert!(image_err.contains("http"));
+
+    for target in ["http://127.0.0.1", "http://10.0.0.1", "http://[::1]"] {
+        let err = validate_ai_proxy_image_url(target).unwrap_err();
+        assert!(err.contains("私有网络") || err.contains("本机"), "{target}: {err}");
+    }
 }
 
 #[test]
