@@ -337,13 +337,12 @@ fn read_zip_entry_to_bytes(
 
 fn local_name(name: quick_xml::name::QName) -> String {
     let raw = name.as_ref();
-    // Handle both {uri}local and prefix:local formats
-    if let Some(pos) = raw.iter().position(|&b| b == b'}') {
-        String::from_utf8_lossy(&raw[pos + 1..]).into_owned()
-    } else if let Some(pos) = raw.iter().position(|&b| b == b':') {
-        String::from_utf8_lossy(&raw[pos + 1..]).into_owned()
+    if let Some(pos) = raw.find('}') {
+        raw[pos + 1..].to_string()
+    } else if let Some(pos) = raw.find(':') {
+        raw[pos + 1..].to_string()
     } else {
-        String::from_utf8_lossy(raw).into_owned()
+        raw.to_string()
     }
 }
 
@@ -367,8 +366,8 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                 let ln = local_name(e.name());
                 if ln == "rootfile" {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"full-path" {
-                            rootfile_path = Some(String::from_utf8_lossy(&attr.value).into_owned());
+                        if attr.key.as_ref() == "full-path" {
+                            rootfile_path = Some(attr.value.to_string());
                         }
                     }
                 }
@@ -409,8 +408,8 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         let mut href = String::new();
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
-                                b"id" => id = String::from_utf8_lossy(&attr.value).into_owned(),
-                                b"href" => href = String::from_utf8_lossy(&attr.value).into_owned(),
+                                "id" => id = attr.value.to_string(),
+                                "href" => href = attr.value.to_string(),
                                 _ => {}
                             }
                         }
@@ -420,8 +419,8 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                     }
                     "itemref" if in_spine => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"idref" {
-                                let idref = String::from_utf8_lossy(&attr.value).into_owned();
+                            if attr.key.as_ref() == "idref" {
+                                let idref = attr.value.to_string();
                                 if let Some(href) = manifest_items.get(&idref) {
                                     spine_hrefs.push(href.clone());
                                 }
@@ -430,13 +429,13 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                     }
                     "title" if in_metadata => {
                         title = match opf_reader.read_text(e.name()) {
-                            Ok(text) => (&*text).trim().to_string(),
+                            Ok(text) => text.into_inner().trim().to_string(),
                             Err(_) => String::new(),
                         };
                     }
                     "creator" if in_metadata => {
                         author = match opf_reader.read_text(e.name()) {
-                            Ok(text) => (&*text).trim().to_string(),
+                            Ok(text) => text.into_inner().trim().to_string(),
                             Err(_) => String::new(),
                         };
                     }
@@ -445,9 +444,9 @@ fn parse_epub(bytes: &[u8]) -> Result<ParsedEpubData, String> {
                         let mut content = String::new();
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
-                                b"name" => name = String::from_utf8_lossy(&attr.value).into_owned(),
-                                b"content" => {
-                                    content = String::from_utf8_lossy(&attr.value).into_owned()
+                                "name" => name = attr.value.to_string(),
+                                "content" => {
+                                    content = attr.value.to_string()
                                 }
                                 _ => {}
                             }
@@ -535,7 +534,7 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if local_name(e.name()) == "title" => {
                 let text = match reader.read_text(e.name()) {
-                    Ok(text) => (&*text).trim().to_string(),
+                    Ok(text) => text.into_inner().trim().to_string(),
                     Err(_) => return None,
                 };
                 let text = text.trim().to_string();
@@ -560,7 +559,7 @@ fn extract_title_from_html_str(html: &str) -> Option<String> {
                     && ln.as_bytes()[1] <= b'6'
                 {
                     let text = match reader.read_text(e.name()) {
-                    Ok(text) => (&*text).trim().to_string(),
+                    Ok(text) => text.into_inner().trim().to_string(),
                     Err(_) => return None,
                 };
                     let text = text.trim().to_string();
@@ -597,7 +596,7 @@ fn strip_html_tags(html: &str) -> String {
                 }
             }
             Ok(Event::Text(ref e)) if !skip => {
-                let text = quick_xml::escape::unescape(&**e).unwrap_or_default().to_string();
+                let text = e.xml10_content().to_string();
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     result.push_str(trimmed);
