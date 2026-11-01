@@ -32,30 +32,21 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-
         let mut access_token = headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_authorization_token);
-        let mut secure_key = headers
+        if access_token.is_none() {
+            access_token = cookie_value(headers, "reader_session");
+        }
+        let secure_key = headers
             .get("X-Secure-Key")
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string());
-        let mut user_ns = headers
+        let user_ns = headers
             .get("X-User-NS")
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_string());
-
-        if let Some(query) = parts.uri.query() {
-            for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-                match k.as_ref() {
-                    "accessToken" if access_token.is_none() => access_token = Some(v.into_owned()),
-                    "secureKey" if secure_key.is_none() => secure_key = Some(v.into_owned()),
-                    "userNS" if user_ns.is_none() => user_ns = Some(v.into_owned()),
-                    _ => {}
-                }
-            }
-        }
 
         Ok(Self {
             access_token,
@@ -63,6 +54,22 @@ where
             user_ns,
         })
     }
+}
+
+fn cookie_value(
+    headers: &axum::http::HeaderMap,
+    name: &str,
+) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            (key == name).then(|| value.trim().to_string())
+        })
+        .next()
 }
 
 fn parse_authorization_token(raw: &str) -> Option<String> {

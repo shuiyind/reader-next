@@ -1,6 +1,9 @@
 use crate::api::{handlers, AppState};
 use crate::service::reader_background_service::MAX_READER_BACKGROUND_BYTES;
 use axum::{
+    http::{header, HeaderValue, Request},
+    middleware::{self, Next},
+    response::Response,
     extract::DefaultBodyLimit,
     routing::{any, get, post},
     Router,
@@ -9,7 +12,7 @@ use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
+
 
 const AI_BOOK_MEMORY_ROUTE: &str = "/reader3/ai/book/memory";
 const AI_BOOK_CHAPTER_MEMORY_ROUTE: &str = "/reader3/ai/book/chapter-memory";
@@ -384,10 +387,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(api)
         .merge(static_web)
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(security_headers))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid::default()))
-        .layer(CorsLayer::very_permissive())
+        .layer(CorsLayer::new())
 }
 
 #[cfg(test)]
@@ -428,6 +431,7 @@ mod tests {
             assets_dir: dir.join("assets").to_string_lossy().to_string(),
             web_root: dir.join("web").to_string_lossy().to_string(),
             database_url,
+            secure: false,
             ..AppConfig::default()
         };
         let http =
@@ -666,3 +670,45 @@ mod tests {
     }
 }
 
+async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Response {
+    let is_untrusted_asset = request.uri().path().starts_with("/assets/");
+    let asset_path = request.uri().path().to_ascii_lowercase();
+    let is_safe_image_asset = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
+        .iter()
+        .any(|extension| asset_path.ends_with(&format!(".{extension}")));
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("object-src 'none'; base-uri 'self'; frame-ancestors 'self'"),
+        );
+    }
+    if is_untrusted_asset && !is_safe_image_asset {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+    }
+    response
+}

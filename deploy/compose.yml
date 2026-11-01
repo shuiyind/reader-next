@@ -15,6 +15,7 @@ services:
       WEB_ROOT: /app/web/dist
       LOG_LEVEL: info
       REQUEST_TIMEOUT_SECS: 15
+      SECURE: "true"
     ports:
       - "${READER_PORT:-18080}:18080"
     volumes:

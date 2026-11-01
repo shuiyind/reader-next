@@ -14,6 +14,7 @@ use crate::parser::js::{eval_js, eval_js_with_bindings, with_js_bindings, with_j
 use crate::parser::rule_engine::RuleEngine;
 use crate::storage::cache::file_cache::FileCache;
 use crate::util::hash::md5_hex;
+use crate::util::net::{parse_public_http_url, public_client, public_client_blocking, read_bytes_limited, read_bytes_limited_blocking, MAX_COVER_RESPONSE_BYTES, MAX_REMOTE_RESPONSE_BYTES};
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use base64::Engine;
 use serde_json::json;
@@ -290,23 +291,17 @@ impl BookService {
             .search_url
             .clone()
             .ok_or_else(|| AppError::BadRequest("missing search_url".to_string()))?;
-        tracing::info!(
-            "searching book from {}: key={}, page={}, url={}",
-            source.book_source_name,
-            key,
-            page,
-            search_url
-        );
+        tracing::debug!("searching book");
         let mut spec = analyze_url(&search_url, key, page, &source.book_source_url, source)
             .map_err(|e| {
-                tracing::error!("analyze_url failed: {:?}", e);
+                tracing::debug!("analyze_url failed");
                 e
             })?;
 
         self.apply_source_cookie(user_ns, source, &mut spec.headers)
             .await;
 
-        tracing::debug!("search_book fetched spec: {:?}", spec);
+        tracing::debug!("search_book request prepared");
         let res = self.fetch_with_rate(source, spec).await.map_err(|e| {
             tracing::error!("fetch failed: {:?}", e);
             e
@@ -466,7 +461,6 @@ impl BookService {
             "status": res.status,
             "url": res.url,
             "checkResult": check_result,
-            "bodyPreview": res.body.chars().take(500).collect::<String>(),
             "bodyHtml": res.body
         }))
     }
@@ -826,11 +820,7 @@ impl BookService {
         let book_url = &book.book_url;
         let chapter_url = &chapter.url;
         let book_key = md5_hex(book_url);
-        tracing::debug!(
-            "get_content called, chapter_url={}, book_key={}",
-            chapter_url,
-            book_key
-        );
+        tracing::debug!("get_content called");
         if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
             tracing::debug!("get_content returning cached content, len={}", cached.len());
             return Ok(cached);
@@ -856,7 +846,7 @@ impl BookService {
             }
             visited_urls.insert(current_url.clone());
 
-            tracing::debug!("get_content fetching: {}", current_url);
+            tracing::debug!("get_content fetching");
             let res = self
                 .fetch_source_url_with_bindings(
                     user_ns,
@@ -881,7 +871,7 @@ impl BookService {
 
             // Check for next page
             if let Some(next_url) = next_url {
-                tracing::debug!("get_content found next_url: {}", next_url);
+                tracing::debug!("get_content found next_url");
                 if should_follow_content_page(chapter_url, &current_url, &next_url) {
                     current_url = next_url;
                 } else {
@@ -1257,20 +1247,21 @@ impl BookService {
     }
 
     pub async fn get_cover(&self, user_ns: &str, url: &str) -> Result<(Vec<u8>, String), AppError> {
-        let ext = file_ext_from_url(url).unwrap_or_else(|| "png".to_string());
-        let name = md5_hex(url);
+        let target = parse_public_http_url(url).map_err(AppError::BadRequest)?;
+        let name = md5_hex(target.as_str());
         let path = self
             .storage_dir
             .join("cache")
             .join(user_ns)
             .join("cover")
-            .join(format!("{}.{}", name, ext));
+            .join(format!("{name}.img"));
         if path.exists() {
             let data = fs::read(&path)
                 .await
                 .map_err(|e| AppError::Internal(e.into()))?;
-            let content_type = content_type_from_ext(&ext);
-            return Ok((data, content_type));
+            let content_type = detect_image_content_type(&data)
+                .ok_or_else(|| AppError::BadRequest("封面不是支持的图片格式".to_string()))?;
+            return Ok((data, content_type.to_string()));
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -1278,41 +1269,25 @@ impl BookService {
                 .map_err(|e| AppError::Internal(e.into()))?;
         }
 
-        // Extract referer from URL for anti-hotlinking bypass
-        let referer = url::Url::parse(url).ok().and_then(|u| {
-            let scheme = u.scheme();
-            let host = u.host_str()?;
-            Some(format!("{}://{}", scheme, host))
-        });
-
-        let mut req = self.http.client().get(url);
-
-        // Add necessary headers to bypass anti-hotlinking
-        req = req
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
-
-        if let Some(ref referer) = referer {
-            req = req.header("Referer", referer);
-        }
-
-        let res = req.send().await.map_err(|e| AppError::Internal(e.into()))?;
-        if !res.status().is_success() {
+        let client = public_client(&target, Duration::from_secs(15))
+            .await
+            .map_err(AppError::BadRequest)?;
+        let response = client
+            .get(target)
+            .header("Accept", "image/png,image/jpeg,image/webp,image/gif,image/bmp")
+            .send()
+            .await
+            .map_err(AppError::Http)?;
+        if !response.status().is_success() {
             return Err(AppError::NotFound("cover not found".to_string()));
         }
-        let content_type = res
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| content_type_from_ext(&ext));
-        let bytes = res
-            .bytes()
+        let bytes = read_bytes_limited(response, MAX_COVER_RESPONSE_BYTES)
             .await
-            .map_err(|e| AppError::Internal(e.into()))?
-            .to_vec();
+            .map_err(AppError::BadRequest)?;
+        let content_type = detect_image_content_type(&bytes)
+            .ok_or_else(|| AppError::BadRequest("封面不是支持的图片格式".to_string()))?;
         let _ = fs::write(&path, &bytes).await;
-        Ok((bytes, content_type))
+        Ok((bytes, content_type.to_string()))
     }
 
     pub async fn load_book_sources_cache(
@@ -1874,17 +1849,7 @@ fn execute_compatible_form_login(
     }
 
     source.runtime.push_notice("正在登录...".to_string());
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => {
-            source.runtime.push_notice("登录请求初始化失败".to_string());
-            return Some(false);
-        }
-    };
+
     let headers = with_js_source(source, || {
         crate::crawler::url_analyzer::source_header_spec(source)
     })
@@ -1892,6 +1857,14 @@ fn execute_compatible_form_login(
     .unwrap_or_default();
 
     for target in targets {
+        let target = match parse_public_http_url(target.as_str()) {
+            Ok(target) => target,
+            Err(_) => continue,
+        };
+        let client = match public_client_blocking(&target, std::time::Duration::from_secs(12)) {
+            Ok(client) => client,
+            Err(_) => continue,
+        };
         let mut request = client.post(target.clone());
         for (name, value) in &headers {
             request = request.header(name, value);
@@ -1904,10 +1877,9 @@ fn execute_compatible_form_login(
             Err(_) => continue,
         };
         let status = response.status();
-        let value = response
-            .text()
+        let value = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES)
             .ok()
-            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         let Some(value) = value else {
             if status.is_server_error() {
                 continue;
@@ -2691,7 +2663,6 @@ fn content_type_from_ext(ext: &str) -> String {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
-        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -3277,4 +3248,23 @@ function key() {
         assert_eq!(result["success"], true);
         assert_eq!(result["openUrl"], "https://source.example/key");
     }
+}
+
+fn detect_image_content_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    None
 }

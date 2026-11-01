@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use zip::ZipArchive;
 
+const MAX_EPUB_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+
 pub const LOCAL_EPUB_ORIGIN: &str = "local-epub";
 pub const LOCAL_EPUB_ORIGIN_NAME: &str = "本地 EPUB";
 pub const MAX_EPUB_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
@@ -309,14 +311,8 @@ fn read_zip_entry_to_string(
     archive: &mut ZipArchive<Cursor<&[u8]>>,
     path: &str,
 ) -> Result<String, String> {
-    let file = archive
-        .by_name(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
-    let mut buf = String::new();
-    std::io::BufReader::new(file)
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("read {}: {}", path, e))?;
-    Ok(buf)
+    let bytes = read_zip_entry_to_bytes(archive, path)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn read_zip_entry_to_bytes(
@@ -325,10 +321,17 @@ fn read_zip_entry_to_bytes(
 ) -> Result<Vec<u8>, String> {
     let mut file = archive
         .by_name(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
+        .map_err(|error| format!("EPUB 缺少文件 {path}: {error}"))?;
+    if file.size() > MAX_EPUB_ENTRY_BYTES {
+        return Err(format!("EPUB 文件 {path} 解压后超过大小限制"));
+    }
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| format!("read {}: {}", path, e))?;
+    file.take(MAX_EPUB_ENTRY_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|error| format!("EPUB 文件 {path} 读取失败: {error}"))?;
+    if buf.len() as u64 > MAX_EPUB_ENTRY_BYTES {
+        return Err(format!("EPUB 文件 {path} 解压后超过大小限制"));
+    }
     Ok(buf)
 }
 

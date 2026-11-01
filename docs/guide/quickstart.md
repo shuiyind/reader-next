@@ -72,7 +72,7 @@ cp .env.example .env
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SERVER_HOST` | `0.0.0.0` | 服务绑定地址 |
+| `SERVER_HOST` | `127.0.0.1` | 服务绑定地址 |
 | `SERVER_PORT` | `18080` | 服务端口 |
 | `DATABASE_URL` | `sqlite:storage/reader.db?mode=rwc` | SQLite 数据库 |
 | `WEB_ROOT` | `frontend/dist` | 前端静态资源目录 |

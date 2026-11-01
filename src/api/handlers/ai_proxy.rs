@@ -103,6 +103,10 @@ pub async fn ai_proxy(
     let use_gemini_api_key_header = should_use_gemini_api_key_header(&target, &path, kind);
     let client = if is_custom_speech_target {
         public_https_speech_proxy_client(&target).await?
+    } else if !req.use_server_config {
+        crate::util::net::public_client(&target, ai_proxy_timeout())
+            .await
+            .map_err(AppError::BadRequest)?
     } else {
         ai_proxy_client()?
     };
@@ -625,7 +629,9 @@ pub async fn ai_proxy_image(
 ) -> Result<Response, AppError> {
     require_proxy_user(&state, &auth).await?;
     let target = validate_ai_proxy_image_url(&req.url).map_err(AppError::BadRequest)?;
-    let client = ai_proxy_client()?;
+    let client = crate::util::net::public_client(&target, ai_proxy_timeout())
+        .await
+        .map_err(AppError::BadRequest)?;
     let upstream = client
         .get(target)
         .header(reqwest::header::ACCEPT, "image/*,*/*;q=0.8")
@@ -645,14 +651,23 @@ pub async fn ai_proxy_image(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| HeaderValue::from_str(v).ok());
-    let body = upstream.bytes().await?;
+    let body = bytes::Bytes::from(crate::util::net::read_bytes_limited(upstream, MAX_PROXY_IMAGE_BYTES as usize).await.map_err(AppError::BadRequest)?);
     if body.len() as u64 > MAX_PROXY_IMAGE_BYTES {
         return Err(AppError::BadRequest("图片超过代理大小限制".to_string()));
     }
     if !status.is_success() {
         return Ok(build_upstream_error_response(status, &body));
     }
-    Ok(build_response(status, content_type, body))
+    let mut response = build_response(status, content_type, body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
+    );
+    Ok(response)
 }
 
 pub async fn azure_tts(
@@ -862,7 +877,7 @@ async fn response_from_upstream(upstream: reqwest::Response) -> Result<Response,
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| HeaderValue::from_str(v).ok());
-    let body = upstream.bytes().await?;
+    let body = bytes::Bytes::from(crate::util::net::read_bytes_limited(upstream, crate::util::net::MAX_PROXY_RESPONSE_BYTES).await.map_err(AppError::BadRequest)?);
     if !status.is_success() {
         return Ok(build_upstream_error_response(status, &body));
     }

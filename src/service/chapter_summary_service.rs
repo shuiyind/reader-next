@@ -168,7 +168,7 @@ impl ChapterSummaryService {
         let response = builder.send().await?;
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(&crate::util::net::read_bytes_limited(response, crate::util::net::MAX_REMOTE_RESPONSE_BYTES).await.unwrap_or_default()).into_owned();
             return Err(AppError::BadRequest(format!(
                 "摘要模型请求失败: {} {}",
                 status,

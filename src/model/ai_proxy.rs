@@ -49,7 +49,7 @@ pub fn build_ai_proxy_url(base_url: &str, path: &str, full_url: bool) -> Result<
 }
 
 pub fn validate_ai_proxy_image_url(url: &str) -> Result<Url, String> {
-    parse_http_url(url)
+    crate::util::net::parse_public_http_url(url)
 }
 
 pub fn ai_proxy_timeout() -> Duration {

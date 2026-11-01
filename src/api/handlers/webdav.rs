@@ -1,6 +1,7 @@
 use crate::api::auth::AuthContext;
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
+use crate::util::path::{safe_path_component, safe_relative_parts};
 use crate::util::time::now_ts;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -90,7 +91,16 @@ pub async fn get_webdav_file(
     let bytes = fs::read(full)
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-    Ok(Response::new(axum::body::Body::from(bytes)))
+    let mut response = Response::new(axum::body::Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment"),
+    );
+    Ok(response)
 }
 
 pub async fn upload_file_to_webdav(
@@ -120,6 +130,8 @@ pub async fn upload_file_to_webdav(
             .file_name()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "file".to_string());
+        let filename = safe_path_component(&filename, "文件名")
+            .map_err(|_| AppError::BadRequest("文件名非法".to_string()))?;
         let data = field
             .bytes()
             .await
@@ -159,6 +171,9 @@ pub async fn delete_webdav_file(
         return Ok(Json(ApiResponse::err("参数错误")));
     }
     let rel = normalize_rel_path(&path)?;
+    if rel.is_empty() {
+        return Ok(Json(ApiResponse::err("参数错误")));
+    }
     let target = join_parts(&home, &rel);
     if !target.exists() {
         return Ok(Json(ApiResponse::err("路径不存在")));
@@ -188,6 +203,9 @@ pub async fn delete_webdav_file_list(
             continue;
         }
         let rel = normalize_rel_path(&p)?;
+        if rel.is_empty() {
+            continue;
+        }
         let target = join_parts(&home, &rel);
         if target.exists() {
             if target.is_dir() {
@@ -220,6 +238,9 @@ pub async fn webdav_handler(
         Ok(p) => p,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    if rel.is_empty() && matches!(method.as_str(), "DELETE" | "MOVE" | "COPY") {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let full = join_parts(&home, &rel);
 
     match method.as_str() {
@@ -287,17 +308,7 @@ async fn webdav_home(state: &AppState, user_ns: &str) -> Result<PathBuf, AppErro
 }
 
 fn normalize_rel_path(path: &str) -> Result<Vec<String>, AppError> {
-    let mut parts = Vec::new();
-    for p in path.split('/') {
-        if p.is_empty() || p == "." {
-            continue;
-        }
-        if p == ".." {
-            return Err(AppError::BadRequest("非法路径".to_string()));
-        }
-        parts.push(p.to_string());
-    }
-    Ok(parts)
+    safe_relative_parts(path).map_err(|_| AppError::BadRequest("非法路径".to_string()))
 }
 
 fn join_parts(home: &PathBuf, parts: &Vec<String>) -> PathBuf {
@@ -415,7 +426,18 @@ async fn webdav_get(full: &PathBuf) -> Response {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     match fs::read(full).await {
-        Ok(data) => Response::new(axum::body::Body::from(data)),
+        Ok(data) => {
+            let mut response = Response::new(axum::body::Body::from(data));
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/octet-stream"),
+            );
+            response.headers_mut().insert(
+                header::CONTENT_DISPOSITION,
+                header::HeaderValue::from_static("attachment"),
+            );
+            response
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -452,6 +474,9 @@ async fn webdav_move(home: &PathBuf, full: &PathBuf, headers: &HeaderMap) -> Res
         Ok(p) => p,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    if rel.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let dest = join_parts(home, &rel);
     if dest.exists() {
         let overwrite = headers
@@ -490,6 +515,9 @@ async fn webdav_copy(home: &PathBuf, full: &PathBuf, headers: &HeaderMap) -> Res
         Ok(p) => p,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    if rel.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let dest = join_parts(home, &rel);
     if dest.exists() {
         let overwrite = headers

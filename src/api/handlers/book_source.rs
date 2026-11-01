@@ -5,6 +5,7 @@ use crate::model::book_source::{book_source_from_value, BookSource};
 use crate::service::book_source_service::{
     book_source_has_group, set_invalid_book_source_group, INVALID_BOOK_SOURCE_GROUP,
 };
+use crate::util::net::{parse_public_http_url, public_client, read_bytes_limited, MAX_REMOTE_RESPONSE_BYTES};
 use crate::util::text::{normalize_source_url, repair_encoded_url};
 use axum::{
     body::Bytes,
@@ -482,10 +483,12 @@ pub async fn book_source_proxy(
         .ok_or_else(|| AppError::NotFound("bookSource not found".to_string()))?;
 
     if let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
-        state
-            .book_service
-            .set_source_cookie(&user_ns, &source.book_source_url, cookie)
-            .await;
+        if let Some(forward_cookie) = filter_forward_cookie(cookie) {
+            state
+                .book_service
+                .set_source_cookie(&user_ns, &source.book_source_url, &forward_cookie)
+                .await;
+        }
     }
 
     let target_url = resolve_proxy_target_url(&raw_target_url, &source.book_source_url)?;
@@ -493,7 +496,7 @@ pub async fn book_source_proxy(
     let response = forward_book_source_request(
         &state,
         &source,
-        auth.access_token(),
+        None,
         &method,
         &headers,
         &target_url,
@@ -519,11 +522,11 @@ pub async fn book_source_client_log(
 ) -> Json<ApiResponse<serde_json::Value>> {
     tracing::warn!(
         "bookSourceProxy client error: source={} line={} col={} message={} stack={}",
-        q.source.as_deref().unwrap_or_default(),
+        sanitize_log_field(q.source.as_deref().unwrap_or_default()),
         q.lineno.unwrap_or_default(),
         q.colno.unwrap_or_default(),
-        q.message.as_deref().unwrap_or_default(),
-        q.stack.as_deref().unwrap_or_default()
+        sanitize_log_field(q.message.as_deref().unwrap_or_default()),
+        sanitize_log_field(q.stack.as_deref().unwrap_or_default())
     );
     Json(ApiResponse::ok(serde_json::json!({ "logged": true })))
 }
@@ -551,15 +554,20 @@ fn resolve_proxy_target_url(
 ) -> Result<String, AppError> {
     let repaired = repair_encoded_url(raw_target_url);
     if let Ok(url) = Url::parse(&repaired) {
-        return Ok(url.to_string());
+        return parse_public_http_url(url.as_str())
+            .map(|url| url.to_string())
+            .map_err(AppError::BadRequest);
     }
 
     let base = normalize_source_url(book_source_url);
     let base = Url::parse(&base)
-        .map_err(|e| AppError::BadRequest(format!("invalid bookSourceUrl: {}", e)))?;
-    base.join(&repaired)
-        .map(|u| u.to_string())
-        .map_err(|e| AppError::BadRequest(format!("invalid proxy target url: {}", e)))
+        .map_err(|e| AppError::BadRequest(format!("invalid bookSourceUrl: {e}")))?;
+    let joined = base
+        .join(&repaired)
+        .map_err(|e| AppError::BadRequest(format!("invalid proxy target url: {e}")))?;
+    parse_public_http_url(joined.as_str())
+        .map(|url| url.to_string())
+        .map_err(AppError::BadRequest)
 }
 
 fn extract_upstream_referer(headers: &HeaderMap) -> Option<String> {
@@ -571,7 +579,7 @@ fn extract_upstream_referer(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn forward_book_source_request(
-    state: &AppState,
+    _state: &AppState,
     source: &BookSource,
     access_token: Option<&str>,
     method: &Method,
@@ -580,14 +588,17 @@ async fn forward_book_source_request(
     upstream_referer: Option<&str>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let client = state.book_service.http_client();
+    let target = Url::parse(target_url).map_err(AppError::BadRequest)?;
+    let client = crate::util::net::public_client(&target, std::time::Duration::from_secs(30))
+        .await
+        .map_err(AppError::BadRequest)?;
     let req_method = match *method {
         Method::GET => reqwest::Method::GET,
         Method::POST => reqwest::Method::POST,
         _ => return Err(AppError::BadRequest("unsupported proxy method".to_string())),
     };
 
-    let mut builder = client.request(req_method, target_url);
+    let mut builder = client.request(req_method, target.clone());
 
     if let Some(header_str) = &source.header {
         if let Ok(source_headers) =
@@ -613,8 +624,10 @@ async fn forward_book_source_request(
         }
     }
 
-    if let Some(cookie) = headers.get(header::COOKIE) {
-        builder = builder.header(header::COOKIE, cookie.clone());
+    if let Some(cookie) = headers.get(header::COOKIE).and_then(|value| value.to_str().ok()) {
+        if let Some(value) = filter_forward_cookie(cookie) {
+            builder = builder.header(header::COOKIE, value);
+        }
     }
 
     let referer_value = upstream_referer.unwrap_or(target_url);
@@ -638,13 +651,7 @@ async fn forward_book_source_request(
         builder = builder.body(body.clone());
     }
 
-    tracing::info!(
-        "bookSourceProxy upstream request: method={} target={} referer={} body_len={}",
-        method,
-        target_url,
-        referer_value,
-        body.len()
-    );
+    tracing::debug!("bookSourceProxy upstream request body_len={}", body.len());
     let upstream = builder.send().await.map_err(AppError::Http)?;
     let status = upstream.status();
     let final_url = upstream.url().to_string();
@@ -659,33 +666,10 @@ async fn forward_book_source_request(
         .iter()
         .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
         .collect();
-    let bytes = upstream.bytes().await.map_err(AppError::Http)?;
-    tracing::info!(
-        "bookSourceProxy upstream response: method={} target={} status={} final_url={}",
-        method,
-        target_url,
-        status,
-        final_url
-    );
-    if is_ajax_api_target(target_url) {
-        let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(500)]).replace('\n', "\\n");
-        tracing::info!(
-            "bookSourceProxy upstream api body: target={} status={} preview={}",
-            target_url,
-            status,
-            preview
-        );
-    }
-    if status.is_client_error() || status.is_server_error() {
-        let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(400)]).replace('\n', "\\n");
-        tracing::warn!(
-            "bookSourceProxy upstream error body: target={} status={} preview={}",
-            target_url,
-            status,
-            preview
-        );
-    }
-
+    let bytes = crate::util::net::read_bytes_limited(upstream, crate::util::net::MAX_PROXY_RESPONSE_BYTES)
+        .await
+        .map_err(AppError::BadRequest)?;
+    tracing::debug!("bookSourceProxy upstream response status={}", status);
     let mut response_headers = HeaderMap::new();
     if let Some(ct) = content_type.as_deref() {
         if let Ok(value) = HeaderValue::from_str(ct) {
@@ -700,6 +684,14 @@ async fn forward_book_source_request(
         }
     }
     response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response_headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox allow-forms allow-scripts allow-popups"),
+    );
+    response_headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
 
     let body = if is_html_response(content_type.as_deref(), &bytes) {
         let text = String::from_utf8_lossy(&bytes).to_string();
@@ -714,8 +706,30 @@ async fn forward_book_source_request(
 fn should_forward_request_header(name: &str) -> bool {
     !matches!(
         name.to_ascii_lowercase().as_str(),
-        "host" | "content-length" | "authorization" | "referer" | "origin" | "connection"
+        "host"
+            | "content-length"
+            | "authorization"
+            | "proxy-authorization"
+            | "referer"
+            | "origin"
+            | "connection"
+            | "cookie"
+            | "x-secure-key"
+            | "x-user-ns"
     )
+}
+
+fn filter_forward_cookie(raw: &str) -> Option<String> {
+    let values: Vec<&str> = raw
+        .split(";")
+        .map(str::trim)
+        .filter(|value| {
+            let name = value.split_once('=').map(|(name, _)| name.trim()).unwrap_or(value);
+            !matches!(name.to_ascii_lowercase().as_str(), "reader_session" | "securekey" | "reader_secure_key")
+        })
+        .filter(|value| !value.is_empty())
+        .collect();
+    (!values.is_empty()).then(|| values.join("; "))
 }
 
 fn is_ajax_api_target(target_url: &str) -> bool {
@@ -768,14 +782,12 @@ fn build_proxy_script(
 ) -> String {
     let upstream_json = serde_json::to_string(upstream_url).unwrap_or_else(|_| "\"\"".to_string());
     let source_json = serde_json::to_string(book_source_url).unwrap_or_else(|_| "\"\"".to_string());
-    let token_json =
-        serde_json::to_string(access_token.unwrap_or("")).unwrap_or_else(|_| "\"\"".to_string());
+    let _ = access_token;
     format!(
         r#"<script>
 (function() {{
   const upstreamBase = {upstream_json};
   const bookSourceUrl = {source_json};
-  const accessToken = {token_json};
   const proxyPath = "/reader3/bookSourceProxy";
   const alreadyProxyPattern = /^\/reader3\/bookSourceProxy(?:\?|$)/i;
   const skipPattern = /^(#|javascript:|data:|mailto:|tel:)/i;
@@ -787,7 +799,6 @@ fn build_proxy_script(
     const absolute = toAbsolute(url);
     if (String(absolute).indexOf("/reader3/bookSourceProxy?") !== -1) return absolute;
     const params = new URLSearchParams();
-    if (accessToken) params.set("accessToken", accessToken);
     params.set("bookSourceUrl", bookSourceUrl);
     params.set("url", absolute);
     return proxyPath + "?" + params.toString();
@@ -927,9 +938,6 @@ fn build_proxy_url(
         format!("bookSourceUrl={}", urlencoding::encode(book_source_url)),
         format!("url={}", urlencoding::encode(absolute.as_str())),
     ];
-    if let Some(token) = access_token.filter(|v| !v.is_empty()) {
-        params.push(format!("accessToken={}", urlencoding::encode(token)));
-    }
     Some(format!("/reader3/bookSourceProxy?{}", params.join("&")))
 }
 
@@ -1077,51 +1085,48 @@ pub struct RemoteSourceParam {
 }
 
 pub async fn read_remote_source_file(
+    State(state): State<AppState>,
+    auth: AuthContext,
     Json(param): Json<RemoteSourceParam>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .danger_accept_invalid_certs(true)
-        .build()
-        .map_err(|e| AppError::Internal(e.into()))?;
-
-    let text = client
-        .get(&param.url)
+    state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+    let target = parse_public_http_url(&param.url).map_err(AppError::BadRequest)?;
+    let client = public_client(&target, std::time::Duration::from_secs(30))
+        .await
+        .map_err(AppError::BadRequest)?;
+    let response = client
+        .get(target)
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch remote source from {}: {:?}", param.url, e);
-            AppError::BadRequest(format!("网络请求失败: {}", e))
-        })?
-        .text()
+        .map_err(|e| AppError::BadRequest(format!("网络请求失败: {e}")))?;
+    let bytes = read_bytes_limited(response, MAX_REMOTE_RESPONSE_BYTES)
         .await
-        .map_err(|e| AppError::BadRequest(format!("读取响应失败: {}", e)))?;
-
-    println!("DEBUG: remote source file length: {}", text.len());
-    println!(
-        "DEBUG: remote source file preview: {}",
-        &text.chars().take(500).collect::<String>()
-    );
-
+        .map_err(AppError::BadRequest)?;
+    let text = String::from_utf8_lossy(&bytes);
     let sources: Vec<BookSource> = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|_| AppError::BadRequest("invalid book sources json format".to_string()))
         .and_then(extract_sources)?;
-
-    println!("DEBUG: parsed {} book sources", sources.len());
-
-    // Return as array of JSON strings (frontend expects each item to be a JSON string)
     let json_str = serde_json::to_string(&sources)
-        .map_err(|e| AppError::BadRequest(format!("序列化书源失败: {}", e)))?;
-
+        .map_err(|e| AppError::BadRequest(format!("序列化书源失败: {e}")))?;
     Ok(Json(ApiResponse::ok(vec![json_str])))
 }
 
 use axum::extract::Multipart;
 
 pub async fn read_source_file(
+    State(state): State<AppState>,
+    auth: AuthContext,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -1185,4 +1190,12 @@ mod tests {
 
         assert!(matches!(err, AppError::BadRequest(message) if message.contains("100")));
     }
+}
+
+fn sanitize_log_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(512)
+        .collect()
 }

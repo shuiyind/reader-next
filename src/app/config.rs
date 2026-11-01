@@ -22,7 +22,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            server_host: "0.0.0.0".to_string(),
+            server_host: "127.0.0.1".to_string(),
             server_port: 18080,
             database_url: "sqlite:storage/reader.db?mode=rwc".to_string(),
             storage_dir: "storage".to_string(),
@@ -32,7 +32,7 @@ impl Default for AppConfig {
             request_timeout_secs: 15,
             cache_max_bytes: crate::storage::cache::file_cache::DEFAULT_CACHE_MAX_BYTES,
             cache_max_age_days: 30,
-            secure: false,
+            secure: true,
             secure_key: "".to_string(),
             invite_code: "".to_string(),
             user_limit: 50,

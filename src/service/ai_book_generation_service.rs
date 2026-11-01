@@ -1208,12 +1208,13 @@ async fn call_image_generation_model(
     let response = builder.send().await.map_err(map_model_http_error)?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let text = response.text().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&crate::util::net::read_bytes_limited(response, crate::util::net::MAX_REMOTE_RESPONSE_BYTES).await.unwrap_or_default()).into_owned();
         return Err(AppError::BadRequest(format_ai_proxy_upstream_error(
             status, &text,
         )));
     }
-    let value: Value = response.json().await?;
+    let bytes = crate::util::net::read_bytes_limited(response, crate::util::net::MAX_REMOTE_RESPONSE_BYTES).await.map_err(AppError::BadRequest)?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| AppError::BadRequest(e.to_string()))?;
     let item = value
         .get("data")
         .and_then(Value::as_array)
@@ -1224,14 +1225,18 @@ async fn call_image_generation_model(
             .decode(b64.trim())
             .map_err(|e| AppError::BadRequest(format!("图片模型返回 base64 无法解析: {e}")))?
     } else if let Some(url) = item.get("url").and_then(Value::as_str) {
-        let response = client.get(url).send().await.map_err(map_model_http_error)?;
+        let target = crate::util::net::parse_public_http_url(url).map_err(AppError::BadRequest)?;
+        let client = crate::util::net::public_client(&target, crate::model::ai_proxy::ai_proxy_timeout())
+            .await
+            .map_err(AppError::BadRequest)?;
+        let response = client.get(target).send().await.map_err(map_model_http_error)?;
         if !response.status().is_success() {
             return Err(AppError::BadRequest(format!(
                 "图片模型返回的图片地址下载失败: {}",
                 response.status().as_u16()
             )));
         }
-        response.bytes().await?.to_vec()
+        crate::util::net::read_bytes_limited(response, crate::util::net::MAX_COVER_RESPONSE_BYTES).await.map_err(AppError::BadRequest)?
     } else {
         return Err(AppError::BadRequest(
             "图片模型返回格式不支持，缺少 data[0].url 或 data[0].b64_json".to_string(),
@@ -1277,12 +1282,13 @@ async fn call_generation_model(
     let response = builder.send().await.map_err(map_model_http_error)?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let text = response.text().await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&crate::util::net::read_bytes_limited(response, crate::util::net::MAX_REMOTE_RESPONSE_BYTES).await.unwrap_or_default()).into_owned();
         return Err(AppError::BadRequest(format_ai_proxy_upstream_error(
             status, &text,
         )));
     }
-    let value: Value = response.json().await?;
+    let bytes = crate::util::net::read_bytes_limited(response, crate::util::net::MAX_REMOTE_RESPONSE_BYTES).await.map_err(AppError::BadRequest)?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| AppError::BadRequest(e.to_string()))?;
     let content = extract_model_content(path, &value)?;
     parse_model_json_value(&content)
 }

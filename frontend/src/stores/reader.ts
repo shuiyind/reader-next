@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import {
   defaultConfig,
   loadConfig,
@@ -1745,16 +1745,7 @@ export const useReaderStore = defineStore('reader', () => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     }
-    const token = localStorage.getItem('accessToken')?.trim()
-    if (token) {
-      headers.Authorization = token
-    }
-    const secureKey = localStorage.getItem('secureKey')?.trim()
-    if (secureKey) {
-      headers['X-Secure-Key'] = secureKey
-    }
-
-    const submittedChangeVersion = progressChangeVersion
+const submittedChangeVersion = progressChangeVersion
     void fetch('/reader3/saveBookProgress', {
       method: 'POST',
       headers,

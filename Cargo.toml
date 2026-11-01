@@ -23,6 +23,9 @@ cbc = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 encoding_rs = "0.8"
 md-5 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
 hex = "0.4"
 serde_with = "3"
 scraper = "0.20"
@@ -47,5 +50,3 @@ quick-xml = "0.31"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 lopdf = "0.34"
 mobi = "0.8"
-
-

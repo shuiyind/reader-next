@@ -2,6 +2,8 @@ use crate::api::auth::AuthContext;
 use crate::api::AppState;
 use axum::{
     extract::{Multipart, Query, State},
+    http::{header, HeaderMap, HeaderValue},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
@@ -10,6 +12,8 @@ use std::path::PathBuf;
 use tokio::fs;
 
 use crate::error::error::{ApiResponse, AppError};
+use crate::util::path::{safe_path_component, safe_relative_parts};
+const MAX_IMAGE_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -64,40 +68,55 @@ pub struct DeleteFileRequest {
 
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<ApiResponse<Value>>, AppError> {
+) -> Result<Response, AppError> {
     let username = req.username.unwrap_or_default();
     let password = req.password.unwrap_or_default();
     let is_login = req.is_login.unwrap_or(false);
-    let is_new_user = !is_login && !username.is_empty(); // registration attempt
-    let data = state
+    let is_new_user = !is_login && !username.is_empty();
+    let mut data = state
         .user_service
         .login(&username, &password, is_login, req.code.as_deref())
         .await?;
-    // If this was a new user registration, copy default book sources
     if is_new_user {
         let _ = state
             .book_source_service
             .copy_default_to_user(&username)
             .await;
     }
-    Ok(Json(ApiResponse::ok(data)))
+    let access_token = data
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let Some(object) = data.as_object_mut() {
+        object.remove("accessToken");
+    }
+    let mut response = Json(ApiResponse::ok(data)).into_response();
+    if let Some(token) = access_token {
+        set_session_cookie(&mut response, &token, request_is_secure(&headers));
+    }
+    Ok(response)
 }
 
 pub async fn logout(
     State(state): State<AppState>,
+    headers: HeaderMap,
     auth: AuthContext,
-) -> Result<Json<ApiResponse<Value>>, AppError> {
+) -> Result<Response, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     if let Some(token) = auth.access_token() {
         let _ = state.user_service.logout(token).await;
     }
-    Ok(Json(ApiResponse::err_with_data(
+    let mut response = Json(ApiResponse::err_with_data(
         "请重新登录",
         Value::String("NEED_LOGIN".to_string()),
-    )))
+    ))
+    .into_response();
+    clear_session_cookie(&mut response, request_is_secure(&headers));
+    Ok(response)
 }
 
 pub async fn get_user_info(
@@ -165,7 +184,7 @@ pub async fn get_user_list(
     auth: AuthContext,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -188,7 +207,7 @@ pub async fn add_user(
     Json(req): Json<AddUserRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -213,7 +232,7 @@ pub async fn reset_password(
     Json(req): Json<ResetPasswordRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -241,7 +260,7 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     let token = auth
         .access_token()
@@ -264,7 +283,7 @@ pub async fn delete_users(
     Json(list): Json<Vec<String>>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -287,7 +306,7 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")));
+        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -333,12 +352,14 @@ pub async fn upload_file(
         }
     };
     let mut file_list = Vec::new();
-    let mut file_type = "images".to_string();
-    if let Some(t) = q.file_type.as_deref() {
-        if !t.is_empty() {
-            file_type = t.to_string();
-        }
+    if q
+        .file_type
+        .as_deref()
+        .is_some_and(|value| !value.is_empty() && value != "images")
+    {
+        return Err(AppError::BadRequest("不支持的文件类型".to_string()));
     }
+    let file_type = "images".to_string();
     while let Some(field) = multipart
         .next_field()
         .await
@@ -348,13 +369,27 @@ pub async fn upload_file(
             .file_name()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "file".to_string());
+        let name = safe_path_component(&name, "文件名")
+            .map_err(|_| AppError::BadRequest("文件名非法".to_string()))?;
+        let extension = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase());
+        if !matches!(
+            extension.as_deref(),
+            Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp")
+        ) {
+            return Err(AppError::BadRequest("仅允许图片文件".to_string()));
+        }
         let data = field
             .bytes()
             .await
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        if data.len() > MAX_IMAGE_UPLOAD_BYTES {
+            return Err(AppError::BadRequest("图片文件超过大小限制".to_string()));
+        }
+        let safe_user_ns = safe_path_component(&user_ns, "用户命名空间")
+            .map_err(|_| AppError::BadRequest("用户命名空间非法".to_string()))?;
         let dir = PathBuf::from(&state.config.storage_dir)
             .join("assets")
-            .join(&user_ns)
+            .join(&safe_user_ns)
             .join(&file_type);
         fs::create_dir_all(&dir)
             .await
@@ -363,7 +398,7 @@ pub async fn upload_file(
         fs::write(&path, data)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
-        let url = format!("/assets/{}/{}/{}", user_ns, file_type, name);
+        let url = format!("/assets/{}/{}/{}", safe_user_ns, file_type, name);
         file_list.push(Value::String(url));
     }
     Ok(Json(ApiResponse::ok(Value::from(file_list))))
@@ -388,14 +423,52 @@ pub async fn delete_file(
         }
     };
     let url = req.url.unwrap_or_default();
-    if url.is_empty() {
-        return Ok(Json(ApiResponse::err("请输入文件链接")));
-    }
-    let prefix = format!("/assets/{}/", user_ns);
+    let prefix = format!("/assets/{}/images/", user_ns);
     if !url.starts_with(&prefix) {
         return Ok(Json(ApiResponse::err("文件链接错误")));
     }
-    let full_path = PathBuf::from(&state.config.storage_dir).join(url.trim_start_matches('/'));
+    let parts = safe_relative_parts(&url[prefix.len()..])
+        .map_err(|_| AppError::BadRequest("文件链接错误".to_string()))?;
+    if parts.len() != 1 {
+        return Ok(Json(ApiResponse::err("文件链接错误")));
+    }
+    let safe_user_ns = safe_path_component(&user_ns, "用户命名空间")
+        .map_err(|_| AppError::BadRequest("用户命名空间非法".to_string()))?;
+    let full_path = PathBuf::from(&state.config.storage_dir)
+        .join("assets")
+        .join(safe_user_ns)
+        .join("images")
+        .join(&parts[0]);
     let _ = fs::remove_file(full_path).await;
     Ok(Json(ApiResponse::ok(Value::String("".to_string()))))
+}
+
+fn request_is_secure(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or_default().trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+        || headers
+            .get("x-forwarded-ssl")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"))
+}
+
+fn set_session_cookie(response: &mut Response, token: &str, secure: bool) {
+    let suffix = if secure { "; Secure" } else { "" };
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "reader_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{suffix}"
+    )) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+}
+
+fn clear_session_cookie(response: &mut Response, secure: bool) {
+    let suffix = if secure { "; Secure" } else { "" };
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "reader_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{suffix}"
+    )) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
 }

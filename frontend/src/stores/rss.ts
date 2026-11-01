@@ -1,9 +1,10 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { deleteRssSource, deleteRssSources, getRssArticles, getRssContent, getRssSources, saveRssSource, saveRssSources } from '../api/rss'
 import type { RssArticle, RssSource } from '../types'
 import { saveRecentReadBook } from '../utils/recentBooks'
 import { toRssSourceDeletePayload } from '../utils/sourceSelection'
+import { sanitizeReaderHtml } from '../utils/sanitizeHtml'
 
 type ArticleScope = 'source' | 'group' | 'all'
 type ScopedArticle = RssArticle & { variable?: string }
@@ -44,11 +45,7 @@ export const useRssStore = defineStore('rss', () => {
       return ''
     }
 
-    return raw
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
-      .trim()
+    return sanitizeReaderHtml(raw)
   }
 
   function normalizeFetchedContent(content?: string | null) {
@@ -69,11 +66,7 @@ export const useRssStore = defineStore('rss', () => {
       return ''
     }
 
-    return raw
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
-      .trim()
+    return sanitizeReaderHtml(raw)
   }
 
   function sourceGroups(source: RssSource) {
