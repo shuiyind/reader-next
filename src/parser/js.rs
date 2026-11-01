@@ -1112,10 +1112,10 @@ fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
 
 fn resolve_js_lib_entry(entry: &str) -> anyhow::Result<String> {
     let value = entry.trim();
-    let target = parse_public_http_url(value)?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30))?;
+    let target = parse_public_http_url(value).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
     let response = client.get(target).send()?;
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES)?;
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -1149,8 +1149,8 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
     let has_request_body = method != Method::GET && method != Method::HEAD;
 
-    let target = parse_public_http_url(url)?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30))?;
+    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
     let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
 
     let mut has_content_type = false;
@@ -1196,21 +1196,21 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
 
     let response = req.send()?;
     store_active_source_cookies(target.as_str(), response.headers());
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES)?;
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn java_request_simple(method: &str, url: &str, body: Option<String>) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
-    let target = parse_public_http_url(url)?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30))?;
+    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
+    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
     let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
     if let Some(body) = body {
         req = req.body(body);
     }
     let response = req.send()?;
     store_active_source_cookies(target.as_str(), response.headers());
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES)?;
+    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

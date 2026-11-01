@@ -84,6 +84,7 @@ pub async fn ai_proxy(
     Json(req): Json<AiProxyRequest>,
 ) -> Result<Response, AppError> {
     require_proxy_user(&state, &auth).await?;
+    let use_server_config = req.use_server_config;
     let is_custom_speech_target =
         !req.use_server_config && req.full_url && req.kind == Some(AiModelKind::Speech);
     let (endpoint, kind, path, mut body) = resolve_ai_proxy_target(&state, &auth, req).await?;
@@ -103,7 +104,7 @@ pub async fn ai_proxy(
     let use_gemini_api_key_header = should_use_gemini_api_key_header(&target, &path, kind);
     let client = if is_custom_speech_target {
         public_https_speech_proxy_client(&target).await?
-    } else if !req.use_server_config {
+    } else if !use_server_config {
         crate::util::net::public_client(&target, ai_proxy_timeout())
             .await
             .map_err(AppError::BadRequest)?

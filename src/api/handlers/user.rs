@@ -92,7 +92,7 @@ pub async fn login(
     if let Some(object) = data.as_object_mut() {
         object.remove("accessToken");
     }
-    let mut response = Json(ApiResponse::ok(data)).into_response();
+    let mut response = Json(ApiResponse::<Value>::ok(data)).into_response();
     if let Some(token) = access_token {
         set_session_cookie(&mut response, &token, request_is_secure(&headers));
     }
@@ -105,7 +105,7 @@ pub async fn logout(
     auth: AuthContext,
 ) -> Result<Response, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")).into_response());
     }
     if let Some(token) = auth.access_token() {
         let _ = state.user_service.logout(token).await;
@@ -184,7 +184,7 @@ pub async fn get_user_list(
     auth: AuthContext,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -207,7 +207,7 @@ pub async fn add_user(
     Json(req): Json<AddUserRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -232,7 +232,7 @@ pub async fn reset_password(
     Json(req): Json<ResetPasswordRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -260,7 +260,7 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     let token = auth
         .access_token()
@@ -283,7 +283,7 @@ pub async fn delete_users(
     Json(list): Json<Vec<String>>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state
@@ -306,7 +306,7 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<ApiResponse<Value>>, AppError> {
     if !state.user_service.secure_enabled() {
-        return Ok(Json(ApiResponse::err("不支持的操作")).into_response());
+        return Ok(Json(ApiResponse::<Value>::err("不支持的操作")));
     }
     // Check if admin (either by is_admin flag or secure key)
     let is_admin = state

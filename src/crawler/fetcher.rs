@@ -78,7 +78,7 @@ pub async fn fetch(_client: &HttpClient, req: RequestSpec) -> anyhow::Result<Fet
         return fetch_data_url(&req);
     }
 
-    let target = parse_public_http_url(&req.url)?;
+    let target = parse_public_http_url(&req.url).map_err(|error| anyhow::anyhow!(error))?;
     let mut last_err: Option<anyhow::Error> = None;
     let max_retries = req.retry;
     for attempt in 0..=max_retries {

@@ -588,7 +588,7 @@ async fn forward_book_source_request(
     upstream_referer: Option<&str>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let target = Url::parse(target_url).map_err(AppError::BadRequest)?;
+    let target = Url::parse(target_url).map_err(|error| AppError::BadRequest(error.to_string()))?;
     let client = crate::util::net::public_client(&target, std::time::Duration::from_secs(30))
         .await
         .map_err(AppError::BadRequest)?;
