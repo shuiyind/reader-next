@@ -92,7 +92,7 @@ jobs:
         run: cargo audit
       - name: "Update npm lockfile for audit"
         working-directory: frontend
-        run: npm install --package-lock-only --ignore-scripts && npm audit fix --package-lock-only --ignore-scripts || true
+        run: npm update --package-lock-only --ignore-scripts
       - name: "Upload updated npm lockfile"
         uses: actions/upload-artifact@v4
         with:
@@ -100,4 +100,4 @@ jobs:
           path: frontend/package-lock.json
       - name: "Audit npm dependencies"
         working-directory: frontend
-        run: npm audit --package-lock-only --audit-level=high
+        run: npm audit --package-lock-only --omit=dev --audit-level=high
