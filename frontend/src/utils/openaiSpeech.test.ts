@@ -4,9 +4,12 @@ import {
   requestOpenAISpeechAudio,
   shouldRequestSpeechDirectly,
 } from './openaiSpeech'
+import { setActiveSecureKey } from './secureAccess'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  setActiveSecureKey('')
 })
 
 describe('openaiSpeech', () => {
@@ -27,8 +30,7 @@ describe('openaiSpeech', () => {
 
   it('routes server configured speech through aiProxy without browser credentials', async () => {
     installLocalStorage()
-    localStorage.setItem('accessToken', 'alice-token')
-    localStorage.setItem('secureKey', 'reader-secure-key')
+    setActiveSecureKey('reader-secure-key')
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,
       blob: async () => new Blob(['audio'], { type: 'audio/mpeg' }),
@@ -53,7 +55,6 @@ describe('openaiSpeech', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({
-          Authorization: 'alice-token',
           'Content-Type': 'application/json',
           'X-Secure-Key': 'reader-secure-key',
         }),

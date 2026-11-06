@@ -671,8 +671,13 @@ mod tests {
 }
 
 async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Response {
-    let is_untrusted_asset = request.uri().path().starts_with("/assets/");
-    let asset_path = request.uri().path().to_ascii_lowercase();
+    let request_path = request.uri().path();
+    let is_auth_response = matches!(
+        request_path,
+        "/reader3/login" | "/reader3/logout" | "/reader3/getUserInfo"
+    );
+    let is_untrusted_asset = request_path.starts_with("/assets/");
+    let asset_path = request_path.to_ascii_lowercase();
     let is_safe_image_asset = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
         .iter()
         .any(|extension| asset_path.ends_with(&format!(".{extension}")));
@@ -699,6 +704,9 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static("object-src 'none'; base-uri 'self'; frame-ancestors 'self'"),
         );
+    }
+    if is_auth_response {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     if is_untrusted_asset && !is_safe_image_asset {
         headers.insert(
