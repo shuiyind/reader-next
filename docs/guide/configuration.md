@@ -41,7 +41,7 @@ Reader Next 通过环境变量进行配置。默认配置定义在 `src/app/conf
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `INVITE_CODE` | 空 | 注册邀请码；安全模式必须配置，留空禁止开放注册 |
+| `INVITE_CODE` | 空 | 注册邀请码；配置时至少16字符，留空禁止开放注册 |
 | `USER_LIMIT` | `50` | 最大用户数 |
 | `USER_BOOK_LIMIT` | `2000` | 每用户最大书籍数 |
 
@@ -70,7 +70,7 @@ SERVER_PORT=18080
 DATABASE_URL=sqlite:storage/reader.db?mode=rwc
 LOG_LEVEL=debug
 SECURE=true
-INVITE_CODE=change-me
+INVITE_CODE=change-me-to-a-long-random-code
 USER_LIMIT=50
 USER_BOOK_LIMIT=2000
 REQUEST_TIMEOUT_SECS=15

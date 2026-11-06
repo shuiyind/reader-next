@@ -14,7 +14,9 @@ use rquickjs::{Context, Object, Runtime, Value};
 use serde_json::Value as JsonValue;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Semaphore};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 static JS_KV: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -250,6 +252,9 @@ fn eval_js_inner(
 }
 
 const MAX_JS_SCRIPT_BYTES: usize = 256 * 1024;
+const MAX_CONCURRENT_JS_EVALS: usize = 4;
+const JS_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+static JS_EVAL_GUARD: Semaphore = Semaphore::new(MAX_CONCURRENT_JS_EVALS);
 
 fn eval_js_inner_with_source(
     script: &str,
@@ -263,13 +268,27 @@ fn eval_js_inner_with_source(
     if script.len() > MAX_JS_SCRIPT_BYTES {
         return Err(anyhow::anyhow!("书源脚本超过大小限制"));
     }
+    let _permit = JS_EVAL_GUARD
+        .try_acquire()
+        .map_err(|_| anyhow::anyhow!("书源脚本并发执行数已达上限"))?;
     let active_source = ACTIVE_SOURCE.with(|cell| cell.borrow().clone());
     let active_bindings = ACTIVE_JS_BINDINGS.with(|cell| cell.borrow().clone());
     let rt = Runtime::new()?;
     rt.set_memory_limit(32 * 1024 * 1024);
     rt.set_max_stack_size(2 * 1024 * 1024);
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + JS_EVAL_TIMEOUT;
+    let timeout_flag = timed_out.clone();
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        if Instant::now() >= deadline {
+            timeout_flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    })));
     let ctx = Context::full(&rt)?;
-    ctx.with(|ctx| {
+    let result = ctx.with(|ctx| {
         let globals = ctx.globals();
         let input_value = input.unwrap_or("");
         let base_url_value = base_url.unwrap_or("");
@@ -969,6 +988,13 @@ java.startBrowserAwait = function (url, title, modal) {
             }
         };
         Ok(result)
+    });
+    result.map_err(|error| {
+        if timed_out.load(Ordering::Relaxed) {
+            anyhow::anyhow!("书源脚本执行超时")
+        } else {
+            error
+        }
     })
 }
 
@@ -1452,5 +1478,19 @@ mod context_binding_tests {
 
         assert_eq!(variable["token"], "saved");
         assert_eq!(variable["route"], "detail-1");
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn interrupts_infinite_source_script() {
+        let started = Instant::now();
+        let error = eval_js("while (true) {}", "", "https://source.example").unwrap_err();
+
+        assert!(error.to_string().contains("书源脚本执行超时"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 }

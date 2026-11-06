@@ -110,7 +110,12 @@
               </svg>
             </button>
           </div>
-          <iframe class="login-preview-frame" :src="loginPreviewFrameUrl" :srcdoc="loginPreviewFrameHtml"></iframe>
+          <iframe
+            class="login-preview-frame"
+            :src="loginPreviewFrameUrl"
+            sandbox="allow-forms allow-scripts allow-popups"
+            referrerpolicy="no-referrer"
+          ></iframe>
         </div>
       </div>
     </Transition>
@@ -159,8 +164,7 @@ import {
   getVisibleSelection,
   toBookSourceDeletePayload,
 } from '../utils/sourceSelection'
-import { appendAuthQueryParams } from '../utils/secureAccess'
-import { normalizeSourceLoginUrl } from '../utils/sourceLoginUrl'
+import { buildSourceLoginProxyUrl, normalizeSourceLoginUrl } from '../utils/sourceLoginUrl'
 import { chunkBookSourceUrls, mergeBookSourceTestResponses } from '../utils/sourceTesting'
 import SourceEditorPanel from './source-manager/SourceEditorPanel.vue'
 import SourceFilterBar from './source-manager/SourceFilterBar.vue'
@@ -205,7 +209,6 @@ const sourceLoginLoading = ref(false)
 const loginPreviewVisible = ref(false)
 const loginPreviewUrl = ref('')
 const loginPreviewFrameUrl = ref('')
-const loginPreviewFrameHtml = ref('')
 const sourceLoginPanelVisible = ref(false)
 const sourceLoginTitle = ref('')
 const sourceLoginSourceUrl = ref('')
@@ -520,16 +523,12 @@ async function handleSourceLogin() {
     const check = typeof result.checkResult === 'string' && result.checkResult.trim()
       ? `，校验结果：${result.checkResult}`
       : ''
-    if (result.bodyHtml?.trim()) {
-      loginPreviewUrl.value = result.url?.trim() || '内置书源登录表单'
-      loginPreviewFrameHtml.value = result.bodyHtml
-      loginPreviewFrameUrl.value = ''
-      loginPreviewVisible.value = true
-    } else if (result.url?.trim()) {
+    if (result.url?.trim()) {
       loginPreviewUrl.value = result.url
-      loginPreviewFrameHtml.value = ''
-      loginPreviewFrameUrl.value = buildLoginProxyUrl(parsed.bookSourceUrl, result.url)
+      loginPreviewFrameUrl.value = buildSourceLoginProxyUrl(parsed.bookSourceUrl, result.url)
       loginPreviewVisible.value = true
+    } else {
+      appStore.showToast('该登录入口不支持安全内嵌预览，请使用支持的登录方式', 'warning')
     }
     const status = typeof result.status === 'number' ? `，状态 ${result.status}` : ''
     appStore.showToast(`书源登录请求已完成${status}${check}`, 'success')
@@ -620,13 +619,6 @@ function closeSourceLoginPanel() {
   sourceLoginOpenUrl.value = ''
 }
 
-function buildLoginProxyUrl(bookSourceUrl: string, targetUrl: string) {
-  const params = new URLSearchParams()
-  appendAuthQueryParams(params)
-  params.set('bookSourceUrl', bookSourceUrl)
-  params.set('url', targetUrl)
-  return `/reader3/bookSourceProxy?${params.toString()}`
-}
 
 function triggerFileImport() {
   fileInputRef.value?.click()

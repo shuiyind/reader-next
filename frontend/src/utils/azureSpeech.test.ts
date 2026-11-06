@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { requestAzureSpeechAudio } from './azureSpeech'
+import { setActiveSecureKey } from './secureAccess'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  setActiveSecureKey('')
 })
 
 describe('azureSpeech', () => {
   it('sends Azure credentials through the authenticated reader proxy endpoint', async () => {
     installLocalStorage()
-    localStorage.setItem('accessToken', 'alice-token')
-    localStorage.setItem('secureKey', 'reader-secure-key')
+    setActiveSecureKey('reader-secure-key')
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,
       blob: async () => new Blob(['audio'], { type: 'audio/mpeg' }),
@@ -29,7 +31,6 @@ describe('azureSpeech', () => {
     expect(fetchMock).toHaveBeenCalledWith('/reader3/tts/azure', expect.objectContaining({
       method: 'POST',
       headers: expect.objectContaining({
-        Authorization: 'alice-token',
         'X-Secure-Key': 'reader-secure-key',
       }),
     }))

@@ -19,6 +19,18 @@ pub struct AppConfig {
     pub user_book_limit: u32,
 }
 
+impl AppConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.secure_key.is_empty() && self.secure_key.len() < 32 {
+            anyhow::bail!("SECURE_KEY 至少需要32个字符");
+        }
+        if !self.invite_code.is_empty() && self.invite_code.len() < 16 {
+            anyhow::bail!("INVITE_CODE 至少需要16个字符");
+        }
+        Ok(())
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -62,5 +74,31 @@ pub fn load() -> anyhow::Result<AppConfig> {
         .set_default("user_book_limit", defaults.user_book_limit as i64)?
         .add_source(config::Environment::default().try_parsing(true))
         .build()?;
-    Ok(cfg.try_deserialize()?)
+    let config: AppConfig = cfg.try_deserialize()?;
+    config.validate()?;
+    Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_short_production_secrets() {
+        let mut config = AppConfig::default();
+        config.secure_key = "short".to_string();
+        assert!(config.validate().is_err());
+
+        let mut config = AppConfig::default();
+        config.invite_code = "short".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_empty_or_strong_production_secrets() {
+        let mut config = AppConfig::default();
+        config.secure_key = "a".repeat(32);
+        config.invite_code = "b".repeat(16);
+        assert!(config.validate().is_ok());
+    }
 }

@@ -211,8 +211,8 @@ npm run docs:build
 | `DATABASE_URL` | `sqlite:storage/reader.db?mode=rwc` | SQLite 数据库 |
 | `WEB_ROOT` | `frontend/dist` | 前端静态资源目录 |
 | `SECURE` | `true` | 是否启用安全模式 |
-| `SECURE_KEY` | 空 | 安全模式密钥，生产环境不要写进镜像 |
-| `INVITE_CODE` | 空 | 注册邀请码；安全模式必须配置，留空禁止开放注册 |
+| `SECURE_KEY` | 空 | 安全模式密钥；配置时至少32字符，生产环境不要写进镜像 |
+| `INVITE_CODE` | 空 | 注册邀请码；配置时至少16字符，留空禁止开放注册 |
 | `USER_LIMIT` | `50` | 最大用户数 |
 | `USER_BOOK_LIMIT` | `2000` | 每用户最大书籍数 |
 | `LOG_LEVEL` | `info` | 日志级别 |

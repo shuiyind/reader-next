@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- 安全修复：书源登录 HTML 不再通过同源 `srcdoc` 执行；远程登录页只经认证代理加载，iframe 禁用同源访问并限制表单、脚本和弹窗能力。
+- 服务端书源 JavaScript 增加 5 秒执行中断和全局并发上限，恶意死循环不再无限占用 CPU。
+- 登录会话改为仅依赖 HttpOnly Cookie；Cookie 使用 `SameSite=Strict`，认证响应设置 `Cache-Control: no-store`，并不再读取旧浏览器 localStorage 中的 access token 或 secure key。
+- `SECURE_KEY`、`INVITE_CODE` 增加最小长度校验，邀请码改为恒定时间比较。
+
 ## v1.0.23 - 2026-09-23
 
 - 发布流程修复：同步 `Cargo.lock` 中的包版本号，恢复 `cargo build --locked` 的 Docker 镜像构建；功能内容与 v1.0.22 相同。
