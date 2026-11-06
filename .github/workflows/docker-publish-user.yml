@@ -19,35 +19,7 @@ env:
   IMAGE_NAME: ghcr.io/shuiyind/reader-next
 
 jobs:
-  verify-version:
-    name: Verify release version
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Check package versions
-        shell: bash
-        run: |
-          cargo_version="$(awk -F'"' '/^\[package\]/{pkg=1;next} /^\[/{pkg=0} pkg && /^version[[:space:]]*=/{print $2;exit}' Cargo.toml)"
-          frontend_version="$(node -p "require('./frontend/package.json').version")"
-          e2e_version="$(node -p "require('./tests/e2e/package.json').version")"
-          expected="${cargo_version}"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            expected="${GITHUB_REF_NAME#v}"
-          fi
-          if [[ "${cargo_version}" != "${expected}" || "${frontend_version}" != "${expected}" || "${e2e_version}" != "${expected}" ]]; then
-            echo "Version mismatch: tag/expected=${expected}, cargo=${cargo_version}, frontend=${frontend_version}, e2e=${e2e_version}" >&2
-            exit 1
-          fi
-
   build:
-    needs: verify-version
     name: Build ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:

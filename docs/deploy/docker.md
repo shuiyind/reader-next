@@ -10,8 +10,7 @@ deploy/
   compose.yml                      # simple user deployment
   compose.local.yml                # local always-on container bound to repo storage/
   Caddyfile                        # Caddy HTTPS reverse proxy config
-  compose.caddy.yml                # optional standalone Caddy deployment
-  compose.synology.yml             # Synology reverse-proxy deployment
+  compose.caddy.yml                # production sample with Caddy
   env.docker.example               # deploy/compose.yml environment template
   env.prod.example                 # VPS deployment environment template
 .github/workflows/docker-publish-user.yml # multi-arch GHCR publishing
@@ -93,26 +92,6 @@ The script requires `READER_DOMAIN`, creates `.env.prod` with random `SECURE_KEY
 
 If Caddy runs behind another TLS terminator, use `deploy/compose.yml` and bind `READER_PORT` only to the trusted proxy network instead of exposing it publicly.
 
-## Synology reverse proxy mode
-
-Use this mode when the Synology NAS terminates TLS and only the Synology reverse-proxy port is exposed publicly. The Reader project itself runs HTTP only and does not configure certificates.
-
-```bash
-APP_DIR=/opt/reader/app \
-DEPLOY_MODE=synology \
-scripts/deploy-do.sh
-```
-
-`deploy/compose.synology.yml` binds the application only to `127.0.0.1:18080` by default. Configure the Synology HTTPS reverse proxy to forward to:
-
-```text
-http://127.0.0.1:18080
-```
-
-The external endpoint is the Synology IPv6 SSL port; do not publish Reader's `18080`, port `80`, or any project TLS port. The reader container runs read-only with all Linux capabilities dropped and writes only through `/app/storage` and `/tmp`.
-
-The optional `deploy/compose.caddy.yml` mode remains available for standalone deployments that need Reader to obtain and manage its own TLS certificate. It is not used in Synology mode.
-
 ## Backups and recovery
 
 `/opt/reader/storage` contains SQLite data, uploads, and caches and must remain mounted across upgrades. Create an online SQLite-consistent archive with:
@@ -143,7 +122,7 @@ The production compose file requires `.env.prod`, uses a persistent host directo
 Verify a published image:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.26
+docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.25
 ```
 
 ## Manual image test

@@ -1,14 +1,11 @@
 # Changelog
 
-## v1.0.26 - 2026-11-06
+## Unreleased
 
 - 安全修复：书源登录 HTML 不再通过同源 `srcdoc` 执行；远程登录页只经认证代理加载，iframe 禁用同源访问并限制表单、脚本和弹窗能力。
 - 服务端书源 JavaScript 增加 5 秒执行中断和全局并发上限，恶意死循环不再无限占用 CPU。
 - 登录会话改为仅依赖 HttpOnly Cookie；Cookie 使用 `SameSite=Strict`，认证响应设置 `Cache-Control: no-store`，并不再读取旧浏览器 localStorage 中的 access token 或 secure key。
 - `SECURE_KEY`、`INVITE_CODE` 增加最小长度校验，邀请码改为恒定时间比较。
-- 新增群晖反向代理部署模式：TLS 由群晖终结，项目仅在 `127.0.0.1:18080` 提供内部 HTTP 服务，不配置项目证书；应用容器启用只读根文件系统、`no-new-privileges` 和 capability drop。
-- 修复生产挂载目录权限；应用数据目录按容器 UID `10001` 初始化，避免 SQLite 首次启动写入失败。
-- 增加 Dependabot 对 GitHub Actions、Rust、npm 和 Docker 依赖的每周更新检查。`n- 修复版本发布一致性：Cargo、前端和 E2E 版本统一为 `1.0.26`，发布脚本同步 Cargo 锁文件并在打标签前运行测试，镜像工作流拒绝版本不一致的标签。
 
 ## v1.0.23 - 2026-09-23
 
