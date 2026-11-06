@@ -10,9 +10,8 @@ deploy/
   compose.yml                      # simple user deployment
   compose.local.yml                # local always-on container bound to repo storage/
   Caddyfile                        # Caddy HTTPS reverse proxy config
-  Caddyfile.single-port            # existing-certificate, IPv6-only TLS config
-  compose.caddy.yml                # production sample with Caddy
-  compose.caddy.single-port.yml    # strict one-port IPv6 TLS deployment
+  compose.caddy.yml                # optional standalone Caddy deployment
+  compose.synology.yml             # Synology reverse-proxy deployment
   env.docker.example               # deploy/compose.yml environment template
   env.prod.example                 # VPS deployment environment template
 .github/workflows/docker-publish-user.yml # multi-arch GHCR publishing
@@ -94,24 +93,25 @@ The script requires `READER_DOMAIN`, creates `.env.prod` with random `SECURE_KEY
 
 If Caddy runs behind another TLS terminator, use `deploy/compose.yml` and bind `READER_PORT` only to the trusted proxy network instead of exposing it publicly.
 
-## Strict single-port IPv6 TLS
+## Synology reverse proxy mode
 
-Use this mode when only one externally reachable IPv6 TCP port is allowed and the certificate is already provisioned:
+Use this mode when the Synology NAS terminates TLS and only the Synology reverse-proxy port is exposed publicly. The Reader project itself runs HTTP only and does not configure certificates.
 
 ```bash
-install -d -m 700 /opt/reader/certs
-# Place fullchain.pem and privkey.pem in /opt/reader/certs.
-
-READER_DOMAIN=reader.example.com \
-READER_CERT_DIR=/opt/reader/certs \
-TLS_MODE=single-port \
 APP_DIR=/opt/reader/app \
+DEPLOY_MODE=synology \
 scripts/deploy-do.sh
 ```
 
-`deploy/compose.caddy.single-port.yml` publishes only `[::]:443/tcp`; it does not publish application port `18080`, port `80`, or UDP `443`. The reader container runs read-only with all Linux capabilities dropped and writes only through `/app/storage` and `/tmp`.
+`deploy/compose.synology.yml` binds the application only to `127.0.0.1:18080` by default. Configure the Synology HTTPS reverse proxy to forward to:
 
-If Caddy must obtain a certificate itself, strict single-port operation requires TLS-ALPN-01 on 443 or DNS-01. HTTP-01 requires port 80 to be reachable during issuance.
+```text
+http://127.0.0.1:18080
+```
+
+The external endpoint is the Synology IPv6 SSL port; do not publish Reader's `18080`, port `80`, or any project TLS port. The reader container runs read-only with all Linux capabilities dropped and writes only through `/app/storage` and `/tmp`.
+
+The optional `deploy/compose.caddy.yml` mode remains available for standalone deployments that need Reader to obtain and manage its own TLS certificate. It is not used in Synology mode.
 
 ## Backups and recovery
 
