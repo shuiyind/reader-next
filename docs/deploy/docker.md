@@ -10,7 +10,9 @@ deploy/
   compose.yml                      # simple user deployment
   compose.local.yml                # local always-on container bound to repo storage/
   Caddyfile                        # Caddy HTTPS reverse proxy config
+  Caddyfile.single-port            # existing-certificate, IPv6-only TLS config
   compose.caddy.yml                # production sample with Caddy
+  compose.caddy.single-port.yml    # strict one-port IPv6 TLS deployment
   env.docker.example               # deploy/compose.yml environment template
   env.prod.example                 # VPS deployment environment template
 .github/workflows/docker-publish-user.yml # multi-arch GHCR publishing
@@ -92,6 +94,25 @@ The script requires `READER_DOMAIN`, creates `.env.prod` with random `SECURE_KEY
 
 If Caddy runs behind another TLS terminator, use `deploy/compose.yml` and bind `READER_PORT` only to the trusted proxy network instead of exposing it publicly.
 
+## Strict single-port IPv6 TLS
+
+Use this mode when only one externally reachable IPv6 TCP port is allowed and the certificate is already provisioned:
+
+```bash
+install -d -m 700 /opt/reader/certs
+# Place fullchain.pem and privkey.pem in /opt/reader/certs.
+
+READER_DOMAIN=reader.example.com \
+READER_CERT_DIR=/opt/reader/certs \
+TLS_MODE=single-port \
+APP_DIR=/opt/reader/app \
+scripts/deploy-do.sh
+```
+
+`deploy/compose.caddy.single-port.yml` publishes only `[::]:443/tcp`; it does not publish application port `18080`, port `80`, or UDP `443`. The reader container runs read-only with all Linux capabilities dropped and writes only through `/app/storage` and `/tmp`.
+
+If Caddy must obtain a certificate itself, strict single-port operation requires TLS-ALPN-01 on 443 or DNS-01. HTTP-01 requires port 80 to be reachable during issuance.
+
 ## Backups and recovery
 
 `/opt/reader/storage` contains SQLite data, uploads, and caches and must remain mounted across upgrades. Create an online SQLite-consistent archive with:
@@ -122,7 +143,7 @@ The production compose file requires `.env.prod`, uses a persistent host directo
 Verify a published image:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.25
+docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.26
 ```
 
 ## Manual image test

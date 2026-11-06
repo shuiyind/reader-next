@@ -1,0 +1,64 @@
+services:
+  reader:
+    image: ${READER_IMAGE:-ghcr.io/shuiyind/reader-next:v1.0.26}
+    container_name: reader-next-prod
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    env_file:
+      - path: ../.env.prod
+        required: true
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 18080
+      DATABASE_URL: sqlite:/app/storage/reader.db?mode=rwc
+      STORAGE_DIR: /app/storage
+      ASSETS_DIR: /app/storage/assets
+      WEB_ROOT: /app/web/dist
+      LOG_LEVEL: info
+      REQUEST_TIMEOUT_SECS: 15
+      SECURE: "true"
+    volumes:
+      - /opt/reader/storage:/app/storage
+    networks:
+      - reader-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18080/ >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: reader-caddy
+    restart: unless-stopped
+    depends_on:
+      - reader
+    environment:
+      READER_DOMAIN: ${READER_DOMAIN:-localhost}
+    ports:
+      - target: 443
+        published: "443"
+        host_ip: "::"
+        protocol: tcp
+    volumes:
+      - ./Caddyfile.single-port:/etc/caddy/Caddyfile:ro
+      - ${READER_CERT_DIR:-./certs}:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - reader-net
+
+networks:
+  reader-net:
+    name: reader-net
+
+volumes:
+  caddy-data:
+  caddy-config:

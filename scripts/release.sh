@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DOCKER_REPO="${DOCKER_REPO:-ghcr.io/shuiyind/reader-next}"
+PUSH_REMOTE="${PUSH_REMOTE:-origin}"
 BUMP_MODE="patch"
 INPUT_VERSION=""
 
@@ -144,14 +145,19 @@ update_cargo_version "$SEMVER"
   npm version "$SEMVER" --no-git-tag-version --allow-same-version >/dev/null
 )
 
-echo "Building frontend..."
+echo "Syncing Cargo lockfile..."
+cargo update --workspace
+
+echo "Testing frontend..."
 (
   cd frontend
-  npm install
+  npm ci
+  npm test
   npm run build
 )
 
-echo "Building Rust binary..."
+echo "Testing and building Rust binary..."
+cargo test --lib
 cargo build --release --locked
 
 echo "Creating commit and tag..."
@@ -165,8 +171,8 @@ git tag -a "$TAG" -m "$TAG"
 
 echo "Pushing git refs..."
 current_branch="$(git branch --show-current)"
-git push origin "$current_branch"
-git push origin "$TAG"
+git push "$PUSH_REMOTE" "$current_branch"
+git push "$PUSH_REMOTE" "$TAG"
 
 echo "Creating GitHub release..."
 gh release create "$TAG" \
@@ -174,7 +180,8 @@ gh release create "$TAG" \
   --generate-notes
 
 echo "Release completed: $TAG"
-echo "GitHub release: https://github.com/HoshimiyaYoku/reader-next/releases/tag/${TAG}"
+release_url="$(gh release view "$TAG" --json url --jq .url)"
+echo "GitHub release: ${release_url}"
 echo "Docker publish workflow should create:"
 echo "  ${DOCKER_REPO}:${TAG}"
 echo "  ${DOCKER_REPO}:${SEMVER}"
