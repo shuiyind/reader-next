@@ -15,7 +15,7 @@ export interface AzureSpeechRequest {
 function buildReaderAuthHeaders() {
   const headers: Record<string, string> = {}
   try {
-    const { accessToken, secureKey } = buildAuthHeaderValues(localStorage)
+    const { accessToken, secureKey } = buildAuthHeaderValues()
     if (accessToken) headers.Authorization = accessToken
     if (secureKey) headers['X-Secure-Key'] = secureKey
   } catch {
