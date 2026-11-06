@@ -14,8 +14,7 @@ export interface BookSourceLoginResponse {
   status?: number
   url?: string
   checkResult?: string | null
-  bodyPreview?: string
-  bodyHtml?: string
+
   mode?: 'legadoUi'
   loginUi?: BookSourceLoginUiItem[]
   loginInfo?: Record<string, string>

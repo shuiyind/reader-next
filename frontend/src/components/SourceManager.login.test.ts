@@ -108,3 +108,58 @@ describe('SourceManager Legado login flow', () => {
     })
   })
 })
+
+describe('SourceManager remote login preview', () => {
+  beforeEach(() => {
+    Object.values(apiMocks).forEach((mock) => mock.mockReset())
+    appStoreMock.showToast.mockReset()
+    apiMocks.saveBookSource.mockResolvedValue({ saved: true })
+  })
+
+  it('never executes upstream login HTML through a same-origin srcdoc frame', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const sourceStore = useSourceStore()
+    const source = {
+      bookSourceName: '远程登录书源',
+      bookSourceUrl: 'https://source.example',
+      loginUrl: 'https://login.example/form',
+      enabled: true,
+    }
+    sourceStore.sources = [source]
+    sourceStore.loaded = true
+    apiMocks.loginBookSource.mockResolvedValue({
+      success: true,
+      status: 200,
+      url: 'https://login.example/form',
+      bodyHtml: '<script>top.location="https://evil.example"</script>',
+    })
+
+    const wrapper = shallowMount(SourceManager, {
+      props: { modelValue: true },
+      global: {
+        plugins: [pinia],
+        stubs: {
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+
+    wrapper.findComponent(SourceList).vm.$emit('edit', source)
+    await nextTick()
+    const editor = wrapper.findComponent(SourceEditorPanel)
+    editor.vm.$emit('update:editorText', JSON.stringify(source))
+    await nextTick()
+    editor.vm.$emit('login')
+    await flushPromises()
+
+    const frame = wrapper.find('iframe.login-preview-frame')
+    expect(frame.exists()).toBe(true)
+    expect(frame.attributes('srcdoc')).toBeUndefined()
+    expect(frame.attributes('sandbox')).toBe('allow-forms allow-scripts allow-popups')
+    expect(frame.attributes('referrerpolicy')).toBe('no-referrer')
+    expect(frame.attributes('src')).toContain('/reader3/bookSourceProxy?')
+    expect(frame.attributes('src')).toContain('url=https%3A%2F%2Flogin.example%2Fform')
+  })
+})
