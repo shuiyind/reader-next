@@ -15,7 +15,7 @@ use serde_json::Value as JsonValue;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -254,7 +254,7 @@ fn eval_js_inner(
 const MAX_JS_SCRIPT_BYTES: usize = 256 * 1024;
 const MAX_CONCURRENT_JS_EVALS: usize = 4;
 const JS_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
-static JS_EVAL_GUARD: Semaphore = Semaphore::new(MAX_CONCURRENT_JS_EVALS);
+static JS_EVAL_GUARD: Semaphore = Semaphore::const_new(MAX_CONCURRENT_JS_EVALS);
 
 fn eval_js_inner_with_source(
     script: &str,
