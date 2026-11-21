@@ -458,7 +458,7 @@ fn request_is_secure(headers: &HeaderMap) -> bool {
 fn set_session_cookie(response: &mut Response, token: &str, secure: bool) {
     let suffix = if secure { "; Secure" } else { "" };
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "reader_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800{suffix}"
+        "reader_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800{suffix}"
     )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -467,7 +467,7 @@ fn set_session_cookie(response: &mut Response, token: &str, secure: bool) {
 fn clear_session_cookie(response: &mut Response, secure: bool) {
     let suffix = if secure { "; Secure" } else { "" };
     if let Ok(value) = HeaderValue::from_str(&format!(
-        "reader_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{suffix}"
+        "reader_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{suffix}"
     )) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }

@@ -662,7 +662,7 @@ describe('reader background synchronization', () => {
     expect(store.readerBackgroundSyncState).toBe('synced')
   })
 
-  it('migrates an existing browser-only background to the server', async () => {
+  it('migrates an existing browser-only background after the user signs in', async () => {
     const image = new Blob(['local-image'], { type: 'image/webp' })
     localStorage.setItem('accessToken', 'migration-user')
     readerBackgroundCache.blobs.set('reader-background', image)
@@ -679,6 +679,12 @@ describe('reader background synchronization', () => {
 
     const store = useReaderStore()
     await vi.waitFor(() => expect(store.readerBackgroundLoaded).toBe(true))
+
+    expect(localStorage.getItem('accessToken')).toBeNull()
+    expect(uploadReaderBackground).not.toHaveBeenCalled()
+    useAppStore().updateUserInfo({ username: 'migration-user' })
+    await vi.waitFor(() => expect(uploadReaderBackground).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(store.readerBackgroundSyncState).toBe('synced'))
 
     expect(uploadReaderBackground).toHaveBeenCalledWith(image, {
       enabled: true,
@@ -832,7 +838,6 @@ describe('reader background synchronization', () => {
   })
 
   it('switches to an isolated cache when the signed-in account changes', async () => {
-    localStorage.setItem('accessToken', 'token-a')
     const firstImage = new Blob(['account-a'], { type: 'image/webp' })
     const secondImage = new Blob(['account-b'], { type: 'image/webp' })
     const firstMetadata = {
@@ -858,11 +863,11 @@ describe('reader background synchronization', () => {
       .mockResolvedValueOnce({ blob: firstImage, etag: firstMetadata.etag })
       .mockResolvedValue({ blob: secondImage, etag: secondMetadata.etag })
     const appStore = useAppStore()
+    appStore.updateUserInfo({ username: 'account-a' })
     const store = useReaderStore()
     await vi.waitFor(() => expect(store.readerBackgroundUrl).toBe('blob:background-1'))
 
-    localStorage.setItem('accessToken', 'token-b')
-    appStore.updateUserInfo({ username: 'account-b', accessToken: 'token-b' })
+    appStore.updateUserInfo({ username: 'account-b' })
     await vi.waitFor(() => expect(store.readerBackgroundUrl).toBe('blob:background-2'))
 
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:background-1')

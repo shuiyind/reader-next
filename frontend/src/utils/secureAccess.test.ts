@@ -3,38 +3,44 @@ import {
   appendAuthQueryParams,
   buildAuthHeaderValues,
   computeNeedSecureKey,
+  readStoredSecureKey,
   SECURE_KEY_STORAGE_KEY,
+  setActiveSecureKey,
 } from './secureAccess'
 
 describe('secureAccess', () => {
-  it('adds stored secure key to auth headers', () => {
-    const storage = {
-      getItem(key: string) {
-        if (key === 'accessToken') return 'token-123'
-        if (key === SECURE_KEY_STORAGE_KEY) return 'secure-456'
-        return null
-      },
-    }
+  it('removes legacy session secrets when initializing the secure key', () => {
+    localStorage.setItem('accessToken', 'token-123')
+    localStorage.setItem(SECURE_KEY_STORAGE_KEY, 'secure-456')
 
-    expect(buildAuthHeaderValues(storage)).toEqual({
-      accessToken: 'token-123',
-      secureKey: 'secure-456',
+    expect(readStoredSecureKey()).toBe('')
+    expect(localStorage.getItem('accessToken')).toBeNull()
+    expect(localStorage.getItem(SECURE_KEY_STORAGE_KEY)).toBeNull()
+    expect(buildAuthHeaderValues()).toEqual({
+      accessToken: undefined,
+      secureKey: undefined,
     })
   })
 
+  it('uses only the in-memory secure key for admin requests', () => {
+    setActiveSecureKey('secure-456')
+
+    expect(buildAuthHeaderValues()).toEqual({
+      accessToken: undefined,
+      secureKey: 'secure-456',
+    })
+
+    setActiveSecureKey('')
+  })
+
   it('never adds auth values to event source query params', () => {
-    const storage = {
-      getItem(key: string) {
-        if (key === 'accessToken') return 'alice-token'
-        if (key === SECURE_KEY_STORAGE_KEY) return 'admin-key'
-        return null
-      },
-    }
+    setActiveSecureKey('admin-key')
     const params = new URLSearchParams()
 
-    appendAuthQueryParams(params, storage)
+    appendAuthQueryParams(params)
 
     expect(params.toString()).toBe('')
+    setActiveSecureKey('')
   })
 
   it('requires secure key only when the server requires it and current request is not admin authorized', () => {

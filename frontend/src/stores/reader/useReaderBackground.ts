@@ -59,16 +59,7 @@ export function useReaderBackground() {
 
   function resolveReaderBackgroundNamespace() {
     const username = appStore.userInfo?.username?.trim()
-    const accessToken = localStorage.getItem('accessToken')?.trim()
-    const secureKey = localStorage.getItem('secureKey')?.trim()
-    const identity = username
-      ? `user:${username}`
-      : accessToken
-        ? `token:${accessToken}`
-        : secureKey
-          ? `secure:${secureKey}`
-          : 'anonymous'
-    return hashReaderBackgroundIdentity(identity)
+    return hashReaderBackgroundIdentity(username ? `user:${username}` : 'anonymous')
   }
 
   function readerBackgroundStorageKey(base: string, namespace: string) {
@@ -182,8 +173,7 @@ export function useReaderBackground() {
   async function claimLegacyReaderBackground(namespace: string) {
     let localBlob = await getReaderBackground(readerBackgroundAssetKey(namespace)).catch(() => null)
     if (localBlob) return localBlob
-    const canClaimLegacy = Boolean(localStorage.getItem('accessToken')?.trim() || appStore.isLoggedIn)
-    if (localStorage.getItem(READER_BACKGROUND_LEGACY_CLAIMED_KEY) || !canClaimLegacy) return null
+    if (localStorage.getItem(READER_BACKGROUND_LEGACY_CLAIMED_KEY) || !appStore.isLoggedIn) return null
     localBlob = await getReaderBackground(READER_BACKGROUND_LEGACY_ASSET_KEY).catch(() => null)
     if (!localBlob) return null
     localStorage.setItem(READER_BACKGROUND_LEGACY_CLAIMED_KEY, namespace)
@@ -270,10 +260,16 @@ export function useReaderBackground() {
         await deleteReaderBackground(readerBackgroundAssetKey(namespace)).catch(() => undefined)
         localStorage.removeItem(etagKey)
         localStorage.setItem(stateKey, 'absent')
+        // Preserve the legacy image's settings until a signed-in user can claim it.
+        const hasUnclaimedLegacy = !appStore.isLoggedIn
+          && !localStorage.getItem(READER_BACKGROUND_LEGACY_CLAIMED_KEY)
+          && await getReaderBackground(READER_BACKGROUND_LEGACY_ASSET_KEY).catch(() => null)
         if (isActiveReaderBackgroundSync(namespace, generation)) {
           replaceReaderBackgroundUrl(null)
-          readerBackgroundConfig.enabled = false
-          persistReaderBackgroundConfig()
+          if (!hasUnclaimedLegacy) {
+            readerBackgroundConfig.enabled = false
+            persistReaderBackgroundConfig()
+          }
         }
       }
       readerBackgroundSyncState.value = readPendingReaderBackgroundSync(namespace) ? 'pending' : 'synced'

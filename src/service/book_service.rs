@@ -430,14 +430,11 @@ impl BookService {
         }
 
         if let Some(target_url) = resolve_login_preview_target(source)? {
-            let body_html = build_login_preview_html(source, &target_url).unwrap_or_default();
             return Ok(serde_json::json!({
                 "success": true,
                 "status": 200,
                 "url": target_url,
-                "checkResult": "脚本型 loginUrl：已提取登录入口，未执行 App 专用 JS",
-                "bodyPreview": "",
-                "bodyHtml": body_html
+                "checkResult": "脚本型 loginUrl：已提取登录入口，未执行 App 专用 JS"
             }));
         }
 
@@ -460,8 +457,7 @@ impl BookService {
             "success": true,
             "status": res.status,
             "url": res.url,
-            "checkResult": check_result,
-            "bodyHtml": res.body
+            "checkResult": check_result
         }))
     }
 
@@ -2118,90 +2114,6 @@ fn resolve_login_preview_target(source: &BookSource) -> Result<Option<String>, A
         .and_then(|base| base.join(&target))
         .map(|url| Some(url.to_string()))
         .map_err(|e| AppError::BadRequest(format!("invalid login target url: {}", e)))
-}
-
-fn build_login_preview_html(source: &BookSource, target_url: &str) -> Option<String> {
-    let login_ui = source.login_ui.as_deref()?.trim();
-    if login_ui.is_empty() || !login_ui.contains("邮箱") || !login_ui.contains("密码") {
-        return None;
-    }
-    let target = html_escape_attr(target_url);
-    let title = html_escape_text(&source.book_source_name);
-    Some(format!(
-        r#"<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    :root {{ color-scheme: light dark; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #171717; color: #f5f5f5; }}
-    main {{ width: min(420px, calc(100vw - 40px)); padding: 28px; border: 1px solid #333; border-radius: 18px; background: #202020; box-shadow: 0 18px 50px rgba(0,0,0,.28); }}
-    h1 {{ margin: 0 0 6px; font-size: 22px; }}
-    p {{ margin: 0 0 20px; color: #aaa; line-height: 1.6; }}
-    label {{ display: block; margin: 14px 0 6px; color: #ddd; }}
-    input {{ width: 100%; box-sizing: border-box; padding: 12px 13px; border-radius: 12px; border: 1px solid #3a3a3a; background: #111; color: #fff; font: inherit; }}
-    button {{ margin-top: 18px; width: 100%; padding: 12px 14px; border: 0; border-radius: 12px; background: #b87822; color: white; font: inherit; font-weight: 700; cursor: pointer; }}
-    pre {{ margin-top: 18px; white-space: pre-wrap; word-break: break-word; color: #d7ffd7; background: #101010; border-radius: 12px; padding: 12px; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>{title}</h1>
-    <p>此书源使用表单登录。账号密码只会提交给：<br>{target}</p>
-    <form id="login-form">
-      <label>邮箱</label>
-      <input name="email" type="email" autocomplete="username" required>
-      <label>密码</label>
-      <input name="password" type="password" autocomplete="current-password" required>
-      <button type="submit">登录</button>
-    </form>
-    <pre id="result"></pre>
-  </main>
-  <script>
-    const form = document.getElementById('login-form');
-    const result = document.getElementById('result');
-    form.addEventListener('submit', async (event) => {{
-      event.preventDefault();
-      result.textContent = '正在登录...';
-      const body = new URLSearchParams(new FormData(form));
-      try {{
-        const res = await fetch("{target}", {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' }},
-          body
-        }});
-        const text = await res.text();
-        try {{
-          const data = JSON.parse(text);
-          const apiKey = data && data.data && data.data.user && data.data.user.api_key;
-          result.textContent = apiKey
-            ? '登录成功。api_key：\n' + apiKey + '\n\n完整响应：\n' + JSON.stringify(data, null, 2)
-            : JSON.stringify(data, null, 2);
-        }} catch (_e) {{
-          result.textContent = text;
-        }}
-      }} catch (e) {{
-        result.textContent = '登录请求失败：' + (e && e.message ? e.message : e);
-      }}
-    }});
-  </script>
-</body>
-</html>"#
-    ))
-}
-
-fn html_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn html_escape_attr(value: &str) -> String {
-    html_escape_text(value)
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 fn looks_like_login_script(value: &str) -> bool {

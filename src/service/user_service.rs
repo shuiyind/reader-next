@@ -860,7 +860,7 @@ impl UserService {
             if c.is_empty() {
                 return Err(AppError::BadRequest("请输入邀请码".to_string()));
             }
-            if c != self.cfg.invite_code {
+            if !constant_time_eq(c.as_bytes(), self.cfg.invite_code.as_bytes()) {
                 return Err(AppError::BadRequest("邀请码错误".to_string()));
             }
         }

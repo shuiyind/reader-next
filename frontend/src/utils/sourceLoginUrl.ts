@@ -22,3 +22,11 @@ export function normalizeSourceLoginUrl(rawUrl: string, sourceUrl: string, pageU
   }
   return url.href
 }
+
+export function buildSourceLoginProxyUrl(bookSourceUrl: string, targetUrl: string) {
+  const target = normalizeSourceLoginUrl(targetUrl, bookSourceUrl, targetUrl)
+  const params = new URLSearchParams()
+  params.set('bookSourceUrl', bookSourceUrl)
+  params.set('url', target)
+  return `/reader3/bookSourceProxy?${params.toString()}`
+}
