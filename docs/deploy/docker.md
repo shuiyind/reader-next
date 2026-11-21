@@ -119,11 +119,18 @@ The production compose file requires `.env.prod`, uses a persistent host directo
 3. Pushing the `vX.Y.Z` tag triggers `.github/workflows/docker-publish-user.yml`.
 4. The workflow builds `amd64` and `arm64` natively, then creates a multi-arch manifest.
 
-Verify a published image:
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:2a61496851079bc91f618dbcdae0274dfea9b357e714881bac63858642ea697a -->
+
+Verify the published image using the version tag printed on the release helper's `Release completed:` line:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/shuiyind/reader-next:v1.0.25
+read -r -p 'Release tag (vX.Y.Z): ' release_tag
+docker buildx imagetools inspect "ghcr.io/shuiyind/reader-next:${release_tag:?Enter the tag printed by the release helper}"
 ```
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Manual image test
 

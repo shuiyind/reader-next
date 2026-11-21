@@ -1,22 +1,24 @@
 use crate::model::book_source::{BookSource, BookSourceRuntime};
 use crate::util::hash::md5_hex;
+use crate::util::net::{
+    parse_public_http_url, public_client, read_bytes_limited, MAX_REMOTE_RESPONSE_BYTES,
+};
 use crate::util::text::{apply_regex_replace, strip_whitespace};
 use aes::Aes128;
 use base64::Engine;
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use chrono::{Local, TimeZone};
 use once_cell::sync::Lazy;
-use crate::util::net::{parse_public_http_url, public_client_blocking, read_bytes_limited_blocking, MAX_REMOTE_RESPONSE_BYTES};
-
 use reqwest::Method;
 use rquickjs::function::{Func, Opt};
 use rquickjs::{Context, Object, Runtime, Value};
 use serde_json::Value as JsonValue;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Semaphore};
+use std::future::Future;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 static JS_KV: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -254,7 +256,14 @@ fn eval_js_inner(
 const MAX_JS_SCRIPT_BYTES: usize = 256 * 1024;
 const MAX_CONCURRENT_JS_EVALS: usize = 4;
 const JS_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
-static JS_EVAL_GUARD: Semaphore = Semaphore::new(MAX_CONCURRENT_JS_EVALS);
+static JS_EVAL_GUARD: Semaphore = Semaphore::const_new(MAX_CONCURRENT_JS_EVALS);
+static JS_HTTP_RUNTIME: Lazy<std::io::Result<tokio::runtime::Runtime>> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(MAX_CONCURRENT_JS_EVALS)
+        .enable_all()
+        .build()
+});
 
 fn eval_js_inner_with_source(
     script: &str,
@@ -276,23 +285,14 @@ fn eval_js_inner_with_source(
     let rt = Runtime::new()?;
     rt.set_memory_limit(32 * 1024 * 1024);
     rt.set_max_stack_size(2 * 1024 * 1024);
-    let timed_out = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + JS_EVAL_TIMEOUT;
-    let timeout_flag = timed_out.clone();
-    rt.set_interrupt_handler(Some(Box::new(move || {
-        if Instant::now() >= deadline {
-            timeout_flag.store(true, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    })));
+    rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
     let ctx = Context::full(&rt)?;
     let result = ctx.with(|ctx| {
         let globals = ctx.globals();
         let input_value = input.unwrap_or("");
         let base_url_value = base_url.unwrap_or("");
-        let shared_js = active_js_lib_script()?;
+        let shared_js = active_js_lib_script(deadline)?;
 
         globals.set("input", input_value)?;
         globals.set("result", input_value)?;
@@ -545,7 +545,9 @@ fn eval_js_inner_with_source(
         let java_obj = Object::new(ctx.clone())?;
         java_obj.set(
             "ajax",
-            Func::new(|spec: String| -> String { java_ajax(&spec).unwrap_or_default() }),
+            Func::new(move |spec: String| -> String {
+                java_ajax(&spec, deadline).unwrap_or_default()
+            }),
         )?;
         let notice_runtime = runtime.clone();
         java_obj.set(
@@ -624,7 +626,7 @@ fn eval_js_inner_with_source(
             "get",
             Func::new(move |key: String| -> Option<String> {
                 if is_http_url(&key) {
-                    return java_request_simple("GET", &key, None).ok();
+                    return java_request_simple("GET", &key, None, deadline).ok();
                 }
                 if let Some(value) = chapter_values
                     .lock()
@@ -652,8 +654,8 @@ fn eval_js_inner_with_source(
         )?;
         java_obj.set(
             "post",
-            Func::new(|url: String, body: String| -> String {
-                java_request_simple("POST", &url, Some(body)).unwrap_or_default()
+            Func::new(move |url: String, body: String| -> String {
+                java_request_simple("POST", &url, Some(body), deadline).unwrap_or_default()
             }),
         )?;
         let state = runtime_state.clone();
@@ -663,7 +665,8 @@ fn eval_js_inner_with_source(
             "put",
             Func::new(move |key: String, value: String| -> String {
                 if is_http_url(&key) {
-                    return java_request_simple("PUT", &key, Some(value)).unwrap_or_default();
+                    return java_request_simple("PUT", &key, Some(value), deadline)
+                        .unwrap_or_default();
                 }
                 let mut state = state.lock().unwrap_or_else(|err| err.into_inner());
                 if has_chapter_binding {
@@ -989,13 +992,10 @@ java.startBrowserAwait = function (url, title, modal) {
         };
         Ok(result)
     });
-    result.map_err(|error| {
-        if timed_out.load(Ordering::Relaxed) {
-            anyhow::anyhow!("书源脚本执行超时")
-        } else {
-            error
-        }
-    })
+    if Instant::now() >= deadline {
+        anyhow::bail!("书源脚本执行超时");
+    }
+    result
 }
 
 fn apply_js_binding<'js>(
@@ -1092,7 +1092,7 @@ fn js_function_binding_script(script: &str) -> Option<String> {
     ))
 }
 
-fn active_js_lib_script() -> anyhow::Result<String> {
+fn active_js_lib_script(deadline: Instant) -> anyhow::Result<String> {
     let js_lib = ACTIVE_JS_LIB.with(|cell| cell.borrow().clone());
     let Some(js_lib) = js_lib.filter(|value| !value.trim().is_empty()) else {
         return Ok(String::new());
@@ -1107,7 +1107,7 @@ fn active_js_lib_script() -> anyhow::Result<String> {
         return Ok(cached);
     }
 
-    let compiled = compile_js_lib(&js_lib)?;
+    let compiled = compile_js_lib(&js_lib, deadline)?;
     JS_LIB_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1115,7 +1115,7 @@ fn active_js_lib_script() -> anyhow::Result<String> {
     Ok(compiled)
 }
 
-fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
+fn compile_js_lib(js_lib: &str, deadline: Instant) -> anyhow::Result<String> {
     let trimmed = js_lib.trim();
     if trimmed.is_empty() {
         return Ok(String::new());
@@ -1126,7 +1126,7 @@ fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
                 let mut scripts = Vec::new();
                 for entry in map.values() {
                     if let Some(raw) = entry.as_str() {
-                        scripts.push(resolve_js_lib_entry(raw)?);
+                        scripts.push(fetch_js_http(raw, deadline, Method::GET, false, |req| req)?);
                     }
                 }
                 return Ok(scripts.join("\n"));
@@ -1134,15 +1134,6 @@ fn compile_js_lib(js_lib: &str) -> anyhow::Result<String> {
         }
     }
     Ok(trimmed.to_string())
-}
-
-fn resolve_js_lib_entry(entry: &str) -> anyhow::Result<String> {
-    let value = entry.trim();
-    let target = parse_public_http_url(value).map_err(|error| anyhow::anyhow!(error))?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
-    let response = client.get(target).send()?;
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn java_time_format(timestamp: i64) -> String {
@@ -1157,7 +1148,7 @@ fn java_time_format(timestamp: i64) -> String {
     }
 }
 
-fn java_ajax(spec: &str) -> anyhow::Result<String> {
+fn java_ajax(spec: &str, deadline: Instant) -> anyhow::Result<String> {
     let (url, options) = split_ajax_spec(spec);
     if url.trim().is_empty() {
         return Ok(String::new());
@@ -1175,97 +1166,143 @@ fn java_ajax(spec: &str) -> anyhow::Result<String> {
     let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
     let has_request_body = method != Method::GET && method != Method::HEAD;
 
-    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
-    let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
-
-    let mut has_content_type = false;
-    if let Some(headers) = options_json.get("headers").and_then(|v| v.as_object()) {
-        for (key, value) in headers {
-            if key.eq_ignore_ascii_case("content-type") {
-                has_content_type = true;
-            }
-            if let Some(value) = value.as_str() {
-                req = req.header(key, value);
-            } else if !value.is_null() {
-                req = req.header(key, value.to_string());
+    fetch_js_http(url, deadline, method, true, move |mut req| {
+        let mut has_content_type = false;
+        if let Some(headers) = options_json.get("headers").and_then(|v| v.as_object()) {
+            for (key, value) in headers {
+                if key.eq_ignore_ascii_case("content-type") {
+                    has_content_type = true;
+                }
+                if let Some(value) = value.as_str() {
+                    req = req.header(key, value);
+                } else if !value.is_null() {
+                    req = req.header(key, value.to_string());
+                }
             }
         }
-    }
 
-    if let Some(body) = options_json.get("body") {
-        if let Some(body) = body.as_str() {
-            if has_request_body && !has_content_type {
-                let content_type =
-                    if matches!(body.trim_start().chars().next(), Some('{') | Some('[')) {
-                        "application/json;charset=UTF-8"
-                    } else {
-                        "application/x-www-form-urlencoded;charset=UTF-8"
-                    };
-                req = req.header(reqwest::header::CONTENT_TYPE, content_type);
+        if let Some(body) = options_json.get("body") {
+            if let Some(body) = body.as_str() {
+                if has_request_body && !has_content_type {
+                    let content_type =
+                        if matches!(body.trim_start().chars().next(), Some('{') | Some('[')) {
+                            "application/json;charset=UTF-8"
+                        } else {
+                            "application/x-www-form-urlencoded;charset=UTF-8"
+                        };
+                    req = req.header(reqwest::header::CONTENT_TYPE, content_type);
+                }
+                req = req.body(body.to_string());
+            } else if !body.is_null() {
+                if has_request_body && !has_content_type {
+                    req = req.header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/json;charset=UTF-8",
+                    );
+                }
+                req = req.body(body.to_string());
             }
-            req = req.body(body.to_string());
-        } else if !body.is_null() {
-            if has_request_body && !has_content_type {
-                req = req.header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/json;charset=UTF-8",
-                );
-            }
-            req = req.body(body.to_string());
         }
-    }
 
-    if let Some(timeout_ms) = options_json.get("timeout").and_then(JsonValue::as_u64) {
-        req = req.timeout(std::time::Duration::from_millis(timeout_ms.max(1)));
-    }
-
-    let response = req.send()?;
-    store_active_source_cookies(target.as_str(), response.headers());
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+        if let Some(timeout_ms) = options_json.get("timeout").and_then(JsonValue::as_u64) {
+            req = req.timeout(std::time::Duration::from_millis(timeout_ms.max(1)));
+        }
+        req
+    })
 }
 
-fn java_request_simple(method: &str, url: &str, body: Option<String>) -> anyhow::Result<String> {
-    let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
-    let target = parse_public_http_url(url).map_err(|error| anyhow::anyhow!(error))?;
-    let client = public_client_blocking(&target, std::time::Duration::from_secs(30)).map_err(|error| anyhow::anyhow!(error))?;
-    let mut req = apply_active_source_cookies(client.request(method, target.clone()), target.as_str());
-    if let Some(body) = body {
-        req = req.body(body);
-    }
-    let response = req.send()?;
-    store_active_source_cookies(target.as_str(), response.headers());
-    let bytes = read_bytes_limited_blocking(response, MAX_REMOTE_RESPONSE_BYTES).map_err(|error| anyhow::anyhow!(error))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn apply_active_source_cookies(
-    request: reqwest::blocking::RequestBuilder,
+fn java_request_simple(
+    method: &str,
     url: &str,
-) -> reqwest::blocking::RequestBuilder {
-    let Some(host) = url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-    else {
-        return request;
+    body: Option<String>,
+    deadline: Instant,
+) -> anyhow::Result<String> {
+    let method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
+    fetch_js_http(url, deadline, method, true, move |req| match body {
+        Some(body) => req.body(body),
+        None => req,
+    })
+}
+
+fn fetch_js_http(
+    url: &str,
+    deadline: Instant,
+    method: Method,
+    use_source_cookies: bool,
+    configure: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Send + 'static,
+) -> anyhow::Result<String> {
+    let target = parse_public_http_url(url).map_err(anyhow::Error::msg)?;
+    let cookie = if use_source_cookies {
+        active_source_cookie(&target)
+    } else {
+        None
     };
-    let cookie = ACTIVE_SOURCE.with(|cell| {
+    let request_target = target.clone();
+    let (headers, bytes) = run_js_http_until(deadline, async move {
+        let client = public_client(&request_target, JS_EVAL_TIMEOUT)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let mut request = client.request(method, request_target);
+        if let Some(cookie) = cookie {
+            request = request.header(reqwest::header::COOKIE, cookie);
+        }
+        let response = configure(request).send().await?;
+        let headers = response.headers().clone();
+        let bytes = read_bytes_limited(response, MAX_REMOTE_RESPONSE_BYTES).await;
+        Ok((headers, bytes))
+    })?;
+    if use_source_cookies {
+        store_active_source_cookies(target.as_str(), &headers);
+    }
+    Ok(String::from_utf8_lossy(&bytes.map_err(anyhow::Error::msg)?).into_owned())
+}
+
+fn run_js_http_until<T: Send + 'static>(
+    deadline: Instant,
+    request: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+) -> anyhow::Result<T> {
+    if Instant::now() >= deadline {
+        anyhow::bail!("书源脚本执行超时");
+    }
+    // QuickJS host callbacks are synchronous. Poll network I/O on an independent
+    // runtime so neither DNS nor response reads can block the evaluation past its deadline.
+    let runtime = JS_HTTP_RUNTIME
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let task = runtime.spawn(async move {
+        let result = tokio::time::timeout_at(deadline.into(), request)
+            .await
+            .map_err(|_| anyhow::anyhow!("书源脚本执行超时"))
+            .and_then(|result| result);
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            task.abort();
+            anyhow::bail!("书源脚本执行超时");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("书源脚本 HTTP 请求任务异常退出");
+        }
+    }
+}
+
+fn active_source_cookie(target: &url::Url) -> Option<String> {
+    let host = target.host_str()?;
+    ACTIVE_SOURCE.with(|cell| {
         let source = cell.borrow();
         let runtime = source.as_ref()?.runtime.snapshot();
         let values = runtime
             .cookies
             .iter()
-            .filter(|(domain, _)| cookie_domain_matches(&host, domain))
+            .filter(|(domain, _)| cookie_domain_matches(host, domain))
             .map(|(_, value)| value.trim())
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
-    });
-    match cookie {
-        Some(cookie) => request.header(reqwest::header::COOKIE, cookie),
-        None => request,
-    }
+    })
 }
 
 fn store_active_source_cookies(url: &str, headers: &reqwest::header::HeaderMap) {
@@ -1484,6 +1521,30 @@ mod context_binding_tests {
 #[cfg(test)]
 mod resource_limit_tests {
     use super::*;
+
+    #[test]
+    fn stalled_http_work_is_cancelled_at_the_deadline() {
+        struct Cancellation(mpsc::Sender<()>);
+
+        impl Drop for Cancellation {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Cancellation(sender);
+        let started = Instant::now();
+        let error = run_js_http_until(started + Duration::from_millis(100), async move {
+            let _cancel = cancel;
+            std::future::pending::<anyhow::Result<()>>().await
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("书源脚本执行超时"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
 
     #[test]
     fn interrupts_infinite_source_script() {

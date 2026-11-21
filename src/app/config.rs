@@ -21,10 +21,10 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if !self.secure_key.is_empty() && self.secure_key.len() < 32 {
+        if !self.secure_key.is_empty() && self.secure_key.chars().count() < 32 {
             anyhow::bail!("SECURE_KEY 至少需要32个字符");
         }
-        if !self.invite_code.is_empty() && self.invite_code.len() < 16 {
+        if !self.invite_code.is_empty() && self.invite_code.chars().count() < 16 {
             anyhow::bail!("INVITE_CODE 至少需要16个字符");
         }
         Ok(())
@@ -95,8 +95,23 @@ mod tests {
     }
 
     #[test]
+    fn counts_characters_in_multibyte_secrets() {
+        let mut config = AppConfig::default();
+        config.secure_key = "密".repeat(31);
+        assert!(config.validate().is_err());
+        config.secure_key.push('密');
+        assert!(config.validate().is_ok());
+
+        config.invite_code = "码".repeat(15);
+        assert!(config.validate().is_err());
+        config.invite_code.push('码');
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn accepts_empty_or_strong_production_secrets() {
         let mut config = AppConfig::default();
+        assert!(config.validate().is_ok());
         config.secure_key = "a".repeat(32);
         config.invite_code = "b".repeat(16);
         assert!(config.validate().is_ok());

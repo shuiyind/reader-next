@@ -8,10 +8,16 @@
 
 ## 克隆项目
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:629c9dba99af20df55c4f67c25e630b7a564c83b9fe35cb9ae3e35d77a0b7abd -->
+
 ```bash
-git clone https://github.com/HoshimiyaYoku/reader-next.git
+git clone https://github.com/shuiyind/reader-next.git
 cd reader-next
 ```
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## 推荐启动方式
 

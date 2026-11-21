@@ -3,15 +3,19 @@ import {
   appendAuthQueryParams,
   buildAuthHeaderValues,
   computeNeedSecureKey,
+  readStoredSecureKey,
   SECURE_KEY_STORAGE_KEY,
   setActiveSecureKey,
 } from './secureAccess'
 
 describe('secureAccess', () => {
-  it('ignores legacy session secrets stored in localStorage', () => {
+  it('removes legacy session secrets when initializing the secure key', () => {
     localStorage.setItem('accessToken', 'token-123')
     localStorage.setItem(SECURE_KEY_STORAGE_KEY, 'secure-456')
 
+    expect(readStoredSecureKey()).toBe('')
+    expect(localStorage.getItem('accessToken')).toBeNull()
+    expect(localStorage.getItem(SECURE_KEY_STORAGE_KEY)).toBeNull()
     expect(buildAuthHeaderValues()).toEqual({
       accessToken: undefined,
       secureKey: undefined,

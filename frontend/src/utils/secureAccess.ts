@@ -26,5 +26,11 @@ export function computeNeedSecureKey(params: {
 }
 
 export function readStoredSecureKey() {
+  try {
+    localStorage.removeItem('accessToken')
+    localStorage.removeItem(SECURE_KEY_STORAGE_KEY)
+  } catch {
+    // Storage may be unavailable; credentials are kept in memory.
+  }
   return activeSecureKey
 }

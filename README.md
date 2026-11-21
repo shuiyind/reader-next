@@ -61,7 +61,13 @@ Reader Next 是一个面向自用与二次开发的阅读 3.0 服务端：Rust �
 
 相对于 fork 时的上游版本，本仓库近期主要增加或改进了：
 
-当前稳定版本为 [v1.0.25](https://github.com/HoshimiyaYoku/reader-next/releases/tag/v1.0.25)。
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:be406007cf38cc41cf38890e8424529e25929d02da72e39a3cabb79bc09c28b8 -->
+
+当前稳定版本为 [v1.0.25](https://github.com/shuiyind/reader-next/tree/v1.0.25)。
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 - 改善 iOS 添加到主屏幕后启动时的安全区域与底部空白问题。
 - 增加“搜索更多”能力，允许继续扩大搜索范围和深度。
