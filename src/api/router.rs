@@ -680,11 +680,17 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     let asset_path = request_path.to_ascii_lowercase();
     // Frontend build artifacts are first-party and must keep their real MIME
     // type, otherwise browsers refuse to execute the ES modules (nosniff).
-    let is_build_artifact = [
-        "js", "mjs", "css", "map", "json", "svg", "ico", "woff", "woff2", "ttf", "otf", "html",
-    ]
-    .iter()
-    .any(|extension| asset_path.ends_with(&format!(".{extension}")));
+    // They live directly under /assets/ (Vite output). User uploads land in
+    // /assets/{user_ns}/... and must stay octet-stream, so require a flat path.
+    let asset_relative = request_path.strip_prefix("/assets/").unwrap_or("");
+    let is_flat_asset = !asset_relative.is_empty() && !asset_relative.contains('/');
+    let is_build_artifact = is_flat_asset
+        && [
+            "js", "mjs", "css", "map", "json", "svg", "ico", "woff", "woff2", "ttf", "otf",
+            "html",
+        ]
+        .iter()
+        .any(|extension| asset_path.ends_with(&format!(".{extension}")));
     let is_safe_image_asset = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
         .iter()
         .any(|extension| asset_path.ends_with(&format!(".{extension}")));
@@ -714,6 +720,29 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     }
     if is_auth_response {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    // tower-http's ServeDir does not guess MIME types (mime_guess feature is
+    // not enabled), and we deliberately keep it that way so the dependency
+    // graph stays on libsqlite3-sys 0.40 (0.37 has RUSTSEC-2026-0459).
+    // Set the Content-Type for first-party build artifacts explicitly.
+    // asset_path is an owned lowercase copy, still valid after `request` is moved
+    let is_webdav_path = asset_path.starts_with("/reader3/webdav/");
+    if is_build_artifact && !is_webdav_path {
+        let extension = asset_path.rsplit('.').next().unwrap_or_default();
+        let mime = match extension {
+            "js" | "mjs" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" | "map" => "application/json",
+            "svg" => "image/svg+xml",
+            "ico" => "image/x-icon",
+            "woff" => "font/woff",
+            "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            "otf" => "font/otf",
+            "html" => "text/html; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
     }
     if is_untrusted_asset && !is_safe_image_asset && !is_build_artifact {
         headers.insert(
