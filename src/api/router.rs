@@ -715,6 +715,27 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     if is_auth_response {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
+    // tower-http's ServeDir does not guess MIME types (mime_guess feature is
+    // not enabled), and we deliberately keep it that way so the dependency
+    // graph stays on libsqlite3-sys 0.40 (0.37 has RUSTSEC-2026-0459).
+    // Set the Content-Type for first-party build artifacts explicitly.
+    if is_build_artifact {
+        let extension = asset_path.rsplit('.').next().unwrap_or_default();
+        let mime = match extension {
+            "js" | "mjs" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" | "map" => "application/json",
+            "svg" => "image/svg+xml",
+            "ico" => "image/x-icon",
+            "woff" => "font/woff",
+            "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            "otf" => "font/otf",
+            "html" => "text/html; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    }
     if is_untrusted_asset && !is_safe_image_asset && !is_build_artifact {
         headers.insert(
             header::CONTENT_TYPE,
