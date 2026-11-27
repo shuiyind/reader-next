@@ -725,7 +725,8 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     // not enabled), and we deliberately keep it that way so the dependency
     // graph stays on libsqlite3-sys 0.40 (0.37 has RUSTSEC-2026-0459).
     // Set the Content-Type for first-party build artifacts explicitly.
-    let is_webdav_path = request_path.starts_with("/reader3/webdav/");
+    // asset_path is an owned lowercase copy, still valid after `request` is moved
+    let is_webdav_path = asset_path.starts_with("/reader3/webdav/");
     if is_build_artifact && !is_webdav_path {
         let extension = asset_path.rsplit('.').next().unwrap_or_default();
         let mime = match extension {
