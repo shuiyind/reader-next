@@ -678,6 +678,13 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     );
     let is_untrusted_asset = request_path.starts_with("/assets/");
     let asset_path = request_path.to_ascii_lowercase();
+    // Frontend build artifacts are first-party and must keep their real MIME
+    // type, otherwise browsers refuse to execute the ES modules (nosniff).
+    let is_build_artifact = [
+        "js", "mjs", "css", "map", "json", "svg", "ico", "woff", "woff2", "ttf", "otf", "html",
+    ]
+    .iter()
+    .any(|extension| asset_path.ends_with(&format!(".{extension}")));
     let is_safe_image_asset = ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
         .iter()
         .any(|extension| asset_path.ends_with(&format!(".{extension}")));
@@ -708,7 +715,7 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
     if is_auth_response {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
-    if is_untrusted_asset && !is_safe_image_asset {
+    if is_untrusted_asset && !is_safe_image_asset && !is_build_artifact {
         headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/octet-stream"),
